@@ -1,0 +1,15 @@
+{
+  "name": "kynveil",
+  "private": true,
+  "packageManager": "pnpm@11.25.0",
+  "engines": {
+    "node": "24.7.0"
+  },
+  "scripts": {
+    "build": "corepack pnpm --filter @kynveil/desktop build",
+    "lint": "corepack pnpm --filter @kynveil/desktop lint",
+    "typecheck": "corepack pnpm --filter @kynveil/desktop typecheck",
+    "test": "corepack pnpm --filter @kynveil/desktop test",
+    "smoke": "corepack pnpm --filter @kynveil/desktop smoke"
+  }
+}
