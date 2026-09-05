@@ -26,7 +26,7 @@ jobs:
           sudo chown root:root "$sandbox_path"
           sudo chmod 4755 "$sandbox_path"
           test "$(stat -c '%u:%g:%a' "$sandbox_path")" = "0:0:4755"
-      - run: corepack pnpm verify
+      - run: xvfb-run -a corepack pnpm verify
 
   storage:
     name: storage (${{ matrix.name }})
