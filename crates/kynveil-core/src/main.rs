@@ -2,8 +2,18 @@
 
 use std::process::ExitCode;
 
+mod ipc;
+
 fn run() -> ExitCode {
-    ExitCode::SUCCESS
+    exit_code(ipc::run_stdio())
+}
+
+fn exit_code(result: Result<(), &'static str>) -> ExitCode {
+    if result.is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 fn main() -> ExitCode {
@@ -14,10 +24,11 @@ fn main() -> ExitCode {
 mod tests {
     use std::process::ExitCode;
 
-    use super::run;
+    use super::exit_code;
 
     #[test]
-    fn exits_successfully() {
-        assert_eq!(run(), ExitCode::SUCCESS);
+    fn maps_service_result_to_exit_code() {
+        assert_eq!(exit_code(Ok(())), ExitCode::SUCCESS);
+        assert_eq!(exit_code(Err("synthetic test failure")), ExitCode::FAILURE);
     }
 }
