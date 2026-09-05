@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package kynveil.ipc.v1;
+
+message Envelope {
+  uint32 protocol_major = 1;
+  uint32 protocol_minor = 2;
+  bytes session_id = 3;
+  uint64 request_id = 4;
+
+  oneof body {
+    HelloRequest hello_request = 10;
+    HelloResponse hello_response = 11;
+    GetStatusRequest get_status_request = 12;
+    GetStatusResponse get_status_response = 13;
+    ShutdownRequest shutdown_request = 14;
+    ShutdownResponse shutdown_response = 15;
+    ErrorResponse error_response = 16;
+  }
+}
+
+message HelloRequest {
+  string client_build = 1;
+}
+
+message HelloResponse {
+  string core_build = 1;
+}
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+  CoreState state = 1;
+}
+
+enum CoreState {
+  CORE_STATE_UNSPECIFIED = 0;
+  CORE_STATE_READY = 1;
+}
+
+message ShutdownRequest {}
+
+message ShutdownResponse {}
+
+message ErrorResponse {
+  ErrorCode code = 1;
+  string message = 2;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_INVALID_REQUEST = 1;
+  ERROR_CODE_UNSUPPORTED_VERSION = 2;
+  ERROR_CODE_STALE_SESSION = 3;
+  ERROR_CODE_DUPLICATE_REQUEST = 4;
+  ERROR_CODE_BUSY = 5;
+  ERROR_CODE_INTERNAL = 6;
+}
