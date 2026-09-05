@@ -5,18 +5,23 @@
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {
-    "build": "electron-vite build",
-    "dev": "electron-vite dev",
-    "lint": "eslint electron.vite.config.ts src",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "smoke": "electron-vite build && electron out/main/index.js kynveil-smoke-test"
+    "build": "corepack pnpm generate && electron-vite build",
+    "dev": "cargo build --package kynveil-core && corepack pnpm build && electron out/main/index.js",
+    "generate": "node ../../scripts/generate-proto.mjs",
+    "lint": "corepack pnpm generate && eslint electron.vite.config.ts src",
+    "security-test": "corepack pnpm build && electron out/main/security-harness.js",
+    "typecheck": "corepack pnpm generate && tsc --noEmit",
+    "test": "corepack pnpm generate && cargo build --package kynveil-core && vitest run",
+    "smoke": "cargo build --package kynveil-core && corepack pnpm build && electron out/main/index.js kynveil-smoke-test"
   },
   "dependencies": {
+    "@bufbuild/protobuf": "2.14.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@bufbuild/buf": "1.72.0",
+    "@bufbuild/protoc-gen-es": "2.14.0",
     "@types/node": "24.13.3",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.5",
