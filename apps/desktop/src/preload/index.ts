@@ -1,1 +1,8 @@
-// The preload API remains intentionally empty until Stage 2 defines its contract.
+import { contextBridge, ipcRenderer } from 'electron'
+
+import { createKynveilApi } from './api.js'
+
+contextBridge.exposeInMainWorld(
+  'kynveil',
+  createKynveilApi((channel) => ipcRenderer.invoke(channel))
+)
