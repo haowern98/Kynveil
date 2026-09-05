@@ -47,6 +47,10 @@ jobs:
             runner: macos-15
             architecture: arm64
             target: aarch64-apple-darwin
+          - name: windows-x86_64
+            runner: windows-2025
+            architecture: x86_64
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -55,7 +59,12 @@ jobs:
       - run: rustup toolchain install 1.97.0 --profile minimal
       - run: corepack pnpm install --frozen-lockfile
       - name: Verify runner architecture
+        if: runner.os != 'Windows'
         run: test "$(uname -m)" = "${{ matrix.architecture }}"
+      - name: Verify Windows runner architecture
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: if (-not [Environment]::Is64BitOperatingSystem) { exit 1 }
       - name: Run Stage 3 storage regressions through controlled native build
         run: node scripts/cargo-with-sqlcipher.mjs test --package kynveil-core storage::tests
       - name: Verify controlled native artifact target
@@ -64,6 +73,7 @@ jobs:
         run: |
           node -e "const artifact = require('./target/kynveil-native/sqlcipher/4.18.0/artifact.json'); if (artifact.target !== process.env.EXPECTED_TARGET || !artifact.libDirectory.startsWith(process.cwd())) process.exit(1)"
       - name: Reject unexpected runtime crypto or SQLite libraries
+        if: runner.os != 'Windows'
         run: |
           binary="$(find target/debug/deps -maxdepth 1 -type f -name 'kynveil_core-*' -perm -111 -print -quit)"
           test -n "$binary"
