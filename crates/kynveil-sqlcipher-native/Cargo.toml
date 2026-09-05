@@ -1,0 +1,17 @@
+[package]
+name = "kynveil-sqlcipher-native"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+links = "kynveil_sqlcipher_native"
+build = "build.rs"
+
+[dependencies]
+openssl-sys = { version = "=0.9.117", features = ["vendored"] }
+
+[build-dependencies]
+cc = "=1.4.5"
+
+[lints]
+workspace = true

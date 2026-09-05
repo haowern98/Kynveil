@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/kynveil-core", "relay"]
+members = ["crates/kynveil-core", "crates/kynveil-sqlcipher-native", "relay"]
 resolver = "3"
 
 [workspace.package]
@@ -9,7 +9,7 @@ rust-version = "1.97"
 
 [workspace.lints.rust]
 missing_docs = "deny"
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = "deny"
