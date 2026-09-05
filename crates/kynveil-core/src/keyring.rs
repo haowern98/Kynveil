@@ -58,7 +58,7 @@ fn install_native_store() -> Result<(), ProfileMasterSecretStoreError> {
         #[cfg(target_os = "windows")]
         let store = windows_native_keyring_store::Store::new();
         #[cfg(target_os = "macos")]
-        let store = apple_native_keyring_store::Store::new();
+        let store = apple_native_keyring_store::keychain::Store::new();
         #[cfg(target_os = "linux")]
         let store = zbus_secret_service_keyring_store::Store::new();
         store
@@ -166,6 +166,12 @@ mod tests {
             ProfileMasterSecret::decode(&encoded).unwrap().as_bytes(),
             generated.as_bytes()
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn installs_the_macos_keychain_provider() {
+        assert!(super::install_native_store().is_ok());
     }
 
     #[cfg(target_os = "windows")]
