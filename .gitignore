@@ -4,3 +4,4 @@ out/
 target/
 coverage/
 *.log
+apps/desktop/src/generated/
