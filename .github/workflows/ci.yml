@@ -18,6 +18,13 @@ jobs:
           node-version: 24.7.0
       - run: rustup toolchain install 1.97.0 --profile minimal
       - run: corepack pnpm install --frozen-lockfile
+      - name: Configure Electron sandbox
+        run: |
+          electron_path="$(corepack pnpm --filter @kynveil/desktop exec node -p "require('electron')")"
+          sandbox_path="$(dirname "$electron_path")/chrome-sandbox"
+          sudo chown root:root "$sandbox_path"
+          sudo chmod 4755 "$sandbox_path"
+          test "$(stat -c '%u:%g:%a' "$sandbox_path")" = "0:0:4755"
       - run: corepack pnpm lint
       - run: corepack pnpm typecheck
       - run: corepack pnpm test
