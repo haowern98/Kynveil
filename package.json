@@ -8,8 +8,10 @@
   "scripts": {
     "build": "corepack pnpm --filter @kynveil/desktop build",
     "lint": "corepack pnpm --filter @kynveil/desktop lint",
+    "security-test": "corepack pnpm --filter @kynveil/desktop security-test",
     "typecheck": "corepack pnpm --filter @kynveil/desktop typecheck",
     "test": "corepack pnpm --filter @kynveil/desktop test",
-    "smoke": "corepack pnpm --filter @kynveil/desktop smoke"
+    "smoke": "corepack pnpm --filter @kynveil/desktop smoke",
+    "verify": "node scripts/verify.mjs"
   }
 }
