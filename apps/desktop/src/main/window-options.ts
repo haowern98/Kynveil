@@ -6,10 +6,16 @@ export function createWindowOptions(preload: string): BrowserWindowConstructorOp
     height: 800,
     show: false,
     webPreferences: {
+      allowRunningInsecureContent: false,
       contextIsolation: true,
+      experimentalFeatures: false,
       nodeIntegration: false,
+      nodeIntegrationInSubFrames: false,
+      nodeIntegrationInWorker: false,
+      partition: 'kynveil-renderer',
       preload,
       sandbox: true,
+      webviewTag: false,
       webSecurity: true
     },
     width: 1200
