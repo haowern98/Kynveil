@@ -8,6 +8,8 @@ use std::process::ExitCode;
 )]
 mod identity;
 mod ipc;
+mod keyring;
+mod profile;
 #[allow(
     dead_code,
     reason = "Stage 3 profile lifecycle wiring follows the profile-path security foundation."
@@ -20,12 +22,38 @@ mod profile_path;
 mod storage;
 
 fn run() -> ExitCode {
-    if profile_path::ProfilePaths::validate_process_arguments().is_err() {
+    let Ok(paths) = profile_path::ProfilePaths::from_sidecar_arguments(std::env::args_os().skip(1))
+    else {
         return ExitCode::FAILURE;
+    };
+    let profile = match paths {
+        Some(paths) => {
+            let created_at =
+                match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                    Ok(duration) => duration.as_secs(),
+                    Err(_) => return ExitCode::FAILURE,
+                };
+            match profile::ProfileLifecycle::open_or_create(
+                &paths,
+                &keyring::NativeProfileMasterSecretStore,
+                created_at,
+            ) {
+                Ok(profile) => Some(profile),
+                Err(_) => return ExitCode::FAILURE,
+            }
+        }
+        None => None,
+    };
+    let service = ipc::run_stdio();
+    let locked = profile.map_or(Ok(()), profile::ProfileLifecycle::lock);
+    if service.is_ok() && locked.is_ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
-    exit_code(ipc::run_stdio())
 }
 
+#[cfg(test)]
 fn exit_code(result: Result<(), &'static str>) -> ExitCode {
     if result.is_ok() {
         ExitCode::SUCCESS
