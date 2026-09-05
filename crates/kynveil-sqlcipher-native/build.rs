@@ -13,22 +13,24 @@ const SQLITE_VERSION: &str = "3.53.4";
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo::rerun-if-env-changed=KYNVEIL_SQLCIPHER_SOURCE_DIR");
+    println!("cargo::rerun-if-env-changed=KYNVEIL_SQLCIPHER_BUILD_DIR");
     println!("cargo::rerun-if-env-changed=DEP_OPENSSL_INCLUDE");
 
     let source = verified_source_directory()?;
+    let build_source = controlled_build_directory(&source)?;
     let openssl_include = PathBuf::from(env::var("DEP_OPENSSL_INCLUDE")?);
     if !openssl_include.join("openssl").join("evp.h").is_file() {
         return Err("vendored OpenSSL headers are unavailable".into());
     }
 
     let compiler = cc::Build::new().get_compiler();
-    generate_amalgamation(&source, &compiler)?;
+    generate_amalgamation(&build_source, &compiler)?;
 
     let mut build = cc::Build::new();
     build
-        .file(source.join("sqlite3.c"))
-        .include(&source)
-        .include(source.join("src"))
+        .file(build_source.join("sqlite3.c"))
+        .include(&build_source)
+        .include(build_source.join("src"))
         .include(&openssl_include)
         .flag("-DSQLITE_CORE")
         .flag("-DSQLITE_DEFAULT_FOREIGN_KEYS=1")
@@ -83,11 +85,39 @@ fn verified_source_directory() -> Result<PathBuf, Box<dyn Error>> {
     }
     if !source.join("LICENSE.md").is_file()
         || !source.join("Makefile.msc").is_file()
+        || !source.join("configure").is_file()
         || !source.join("src").join("sqlcipher.c").is_file()
+        || source.join("sqlite3.c").is_file()
     {
         return Err("reviewed SQLCipher source tree is incomplete".into());
     }
     Ok(source)
+}
+
+fn controlled_build_directory(source: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    let build = PathBuf::from(env::var("KYNVEIL_SQLCIPHER_BUILD_DIR")?);
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .ok_or("cannot locate workspace root")?;
+    let expected_root = workspace
+        .join("target")
+        .join("kynveil-native")
+        .join("sqlcipher")
+        .join("4.18.0")
+        .join("build")
+        .canonicalize()?;
+    let canonical_build = build.canonicalize()?;
+    let target = canonical_build
+        .strip_prefix(&expected_root)
+        .map_err(|_| "SQLCipher build source is outside Kynveil's controlled build output")?;
+    if target.components().count() != 1 || canonical_build == source.canonicalize()? {
+        return Err("SQLCipher build source must be a target-specific copy".into());
+    }
+    if !build.join("configure").is_file() || !build.join("src").join("sqlcipher.c").is_file() {
+        return Err("controlled SQLCipher build source tree is incomplete".into());
+    }
+    Ok(build)
 }
 
 fn generate_amalgamation(source: &Path, compiler: &cc::Tool) -> Result<(), Box<dyn Error>> {
@@ -125,9 +155,17 @@ fn generate_amalgamation(source: &Path, compiler: &cc::Tool) -> Result<(), Box<d
         )?;
         Command::new(launcher)
     } else {
-        let mut command = Command::new("make");
-        command.arg("sqlite3.c").current_dir(source);
-        command
+        let mut configure = Command::new(source.join("configure"));
+        configure
+            .arg("--disable-shared")
+            .arg("--enable-static")
+            .current_dir(source);
+        if !configure.status()?.success() {
+            return Err("the official SQLCipher source failed to configure".into());
+        }
+        let mut make = Command::new("make");
+        make.arg("sqlite3.c").current_dir(source);
+        make
     };
     if !command.status()?.success() || !source.join("sqlite3.c").is_file() {
         return Err("the official SQLCipher source failed to generate sqlite3.c".into());
