@@ -247,3 +247,276 @@ fn validate_credential(credential: &DeviceCredential) -> Result<(), IdentityErro
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use ed25519_dalek::{Signature, Signer, SigningKey};
+
+    use super::*;
+
+    const RFC_8032_SEED: [u8; 32] = [
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c,
+        0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae,
+        0x7f, 0x60,
+    ];
+    const RFC_8032_PUBLIC_KEY: [u8; 32] = [
+        0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07,
+        0x3a, 0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07,
+        0x51, 0x1a,
+    ];
+    const RFC_8032_SIGNATURE: [u8; 64] = [
+        0xe5, 0x56, 0x43, 0x00, 0xc3, 0x60, 0xac, 0x72, 0x90, 0x86, 0xe2, 0xcc, 0x80, 0x6e, 0x82,
+        0x8a, 0x84, 0x87, 0x7f, 0x1e, 0xb8, 0xe5, 0xd9, 0x74, 0xd8, 0x73, 0xe0, 0x65, 0x22, 0x49,
+        0x01, 0x55, 0x5f, 0xb8, 0x82, 0x15, 0x90, 0xa3, 0x3b, 0xac, 0xc6, 0x1e, 0x39, 0x70, 0x1c,
+        0xf9, 0xb4, 0x6b, 0xd2, 0x5b, 0xf5, 0xf0, 0x59, 0x5b, 0xbe, 0x24, 0x65, 0x51, 0x41, 0x43,
+        0x8e, 0x7a, 0x10, 0x0b,
+    ];
+    const GOLDEN_CREDENTIAL: [u8; 132] = [
+        0xa6, 0x00, 0x01, 0x01, 0x58, 0x20, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+        0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x02, 0x50, 0x20, 0x21, 0x22, 0x23, 0x24,
+        0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x03, 0x58, 0x20, 0x30,
+        0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+        0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e,
+        0x4f, 0x04, 0x58, 0x20, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a,
+        0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49,
+        0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x05, 0x1a, 0x65, 0x53, 0xf1, 0x00,
+    ];
+
+    fn credential() -> DeviceCredential {
+        DeviceCredential {
+            version: 1,
+            user_root_id: core::array::from_fn(|index| {
+                u8::try_from(index).expect("fixture index fits in u8")
+            }),
+            device_id: core::array::from_fn(|index| {
+                u8::try_from(index + 0x20).expect("fixture index fits in u8")
+            }),
+            device_signing_public_key: core::array::from_fn(|index| {
+                u8::try_from(index + 0x30).expect("fixture index fits in u8")
+            }),
+            mls_signing_key_binding: core::array::from_fn(|index| {
+                u8::try_from(index + 0x30).expect("fixture index fits in u8")
+            }),
+            created_at: 1_700_000_000,
+        }
+    }
+
+    #[test]
+    fn matches_rfc_8032_vector_one() {
+        let signing_key = SigningKey::from_bytes(&RFC_8032_SEED);
+
+        assert_eq!(signing_key.verifying_key().to_bytes(), RFC_8032_PUBLIC_KEY);
+        assert_eq!(signing_key.sign(b"").to_bytes(), RFC_8032_SIGNATURE);
+        assert!(
+            signing_key
+                .verifying_key()
+                .verify_strict(
+                    b"",
+                    &Signature::try_from(RFC_8032_SIGNATURE.as_slice()).unwrap()
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn generates_independent_root_and_device_identities() {
+        let identity = create_identity(1_700_000_000).unwrap();
+
+        assert_eq!(
+            SigningKey::from_bytes(&identity.root_signing_seed)
+                .verifying_key()
+                .to_bytes(),
+            identity.root_public_key
+        );
+        assert_eq!(
+            SigningKey::from_bytes(&identity.device_signing_seed)
+                .verifying_key()
+                .to_bytes(),
+            identity.device_credential.device_signing_public_key
+        );
+        assert_ne!(
+            identity.root_public_key,
+            identity.device_credential.device_signing_public_key
+        );
+        assert_eq!(
+            identity.root_public_key,
+            identity.device_credential.user_root_id
+        );
+        assert_eq!(
+            identity.device_credential.device_signing_public_key,
+            identity.device_credential.mls_signing_key_binding
+        );
+        assert_eq!(
+            verify_device_credential(
+                &identity.root_public_key,
+                &encode_device_credential(&identity.device_credential).unwrap(),
+                &identity.device_credential_signature
+            )
+            .unwrap(),
+            identity.device_credential
+        );
+    }
+
+    #[test]
+    fn encodes_the_frozen_device_credential_vector() {
+        let credential = credential();
+
+        assert_eq!(
+            encode_device_credential(&credential).unwrap(),
+            GOLDEN_CREDENTIAL
+        );
+        assert_eq!(
+            decode_device_credential(&GOLDEN_CREDENTIAL).unwrap(),
+            credential
+        );
+    }
+
+    #[test]
+    fn signs_and_verifies_the_exact_domain_separated_credential_bytes() {
+        let root_seed = [0x42; 32];
+        let root_public_key = SigningKey::from_bytes(&root_seed)
+            .verifying_key()
+            .to_bytes();
+        let mut credential = credential();
+        credential.user_root_id = root_public_key;
+        let encoded = encode_device_credential(&credential).unwrap();
+        let signature = sign_device_credential(&root_seed, &credential).unwrap();
+        let mut expected_signed_bytes = Vec::from(b"kynveil/v1/device-credential\0".as_slice());
+        expected_signed_bytes.extend_from_slice(&encoded);
+
+        assert_eq!(
+            signature,
+            SigningKey::from_bytes(&root_seed)
+                .sign(&expected_signed_bytes)
+                .to_bytes()
+        );
+        assert_eq!(
+            verify_device_credential(&root_public_key, &encoded, &signature).unwrap(),
+            credential
+        );
+    }
+
+    #[test]
+    fn rejects_altered_signatures_and_signed_payloads() {
+        let root_seed = [0x42; 32];
+        let root_public_key = SigningKey::from_bytes(&root_seed)
+            .verifying_key()
+            .to_bytes();
+        let mut credential = credential();
+        credential.user_root_id = root_public_key;
+        let mut signature = sign_device_credential(&root_seed, &credential).unwrap();
+        let encoded = encode_device_credential(&credential).unwrap();
+
+        signature[0] ^= 1;
+        assert_eq!(
+            verify_device_credential(&root_public_key, &encoded, &signature),
+            Err(IdentityError::InvalidSignature)
+        );
+
+        let mut altered_payload = encoded;
+        altered_payload[131] ^= 1;
+        let signature = sign_device_credential(&root_seed, &credential).unwrap();
+        assert_eq!(
+            verify_device_credential(&root_public_key, &altered_payload, &signature),
+            Err(IdentityError::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_and_non_deterministic_credential_encodings() {
+        let mut duplicate_key = GOLDEN_CREDENTIAL;
+        duplicate_key[3] = 0;
+        assert_eq!(
+            decode_device_credential(&duplicate_key),
+            Err(IdentityError::MalformedCredential)
+        );
+
+        let mut unknown_key = GOLDEN_CREDENTIAL;
+        unknown_key[3] = 6;
+        assert_eq!(
+            decode_device_credential(&unknown_key),
+            Err(IdentityError::MalformedCredential)
+        );
+
+        let mut wrong_length = GOLDEN_CREDENTIAL;
+        wrong_length[5] = 0x1f;
+        assert_eq!(
+            decode_device_credential(&wrong_length),
+            Err(IdentityError::MalformedCredential)
+        );
+
+        let mut wrong_type = GOLDEN_CREDENTIAL;
+        wrong_type[127] = 0x40;
+        assert_eq!(
+            decode_device_credential(&wrong_type),
+            Err(IdentityError::MalformedCredential)
+        );
+
+        let mut missing_field = GOLDEN_CREDENTIAL[..126].to_vec();
+        missing_field[0] = 0xa5;
+        assert_eq!(
+            decode_device_credential(&missing_field),
+            Err(IdentityError::MalformedCredential)
+        );
+
+        let mut unsupported_version = GOLDEN_CREDENTIAL;
+        unsupported_version[2] = 2;
+        assert_eq!(
+            decode_device_credential(&unsupported_version),
+            Err(IdentityError::MalformedCredential)
+        );
+
+        let mut trailing_data = GOLDEN_CREDENTIAL.to_vec();
+        trailing_data.push(0);
+        assert_eq!(
+            decode_device_credential(&trailing_data),
+            Err(IdentityError::MalformedCredential)
+        );
+
+        let mut non_deterministic = Vec::from([0xa6, 0x00, 0x18, 0x01]);
+        non_deterministic.extend_from_slice(&GOLDEN_CREDENTIAL[3..]);
+        assert_eq!(
+            decode_device_credential(&non_deterministic),
+            Err(IdentityError::MalformedCredential)
+        );
+    }
+
+    #[test]
+    fn rejects_a_non_matching_mls_signing_key_binding() {
+        let mut credential = credential();
+        credential.mls_signing_key_binding[0] ^= 1;
+
+        assert_eq!(
+            encode_device_credential(&credential),
+            Err(IdentityError::MalformedCredential)
+        );
+    }
+
+    #[test]
+    fn rejects_a_credential_claiming_a_different_root_identity() {
+        let root_seed = [0x42; 32];
+        let root_public_key = SigningKey::from_bytes(&root_seed)
+            .verifying_key()
+            .to_bytes();
+        let mut credential = credential();
+        credential.user_root_id[0] ^= 1;
+        let encoded = encode_device_credential(&credential).unwrap();
+        let signature = SigningKey::from_bytes(&root_seed)
+            .sign(&device_credential_signing_bytes(&credential).unwrap())
+            .to_bytes();
+
+        assert_eq!(
+            verify_device_credential(&root_public_key, &encoded, &signature),
+            Err(IdentityError::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn refuses_to_sign_a_credential_for_an_unrelated_root_identity() {
+        assert_eq!(
+            sign_device_credential(&[0x8A; 32], &credential()),
+            Err(IdentityError::InvalidSignature)
+        );
+    }
+}
