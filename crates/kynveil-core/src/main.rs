@@ -3,8 +3,21 @@
 use std::process::ExitCode;
 
 mod ipc;
+#[allow(
+    dead_code,
+    reason = "Stage 3 profile lifecycle wiring follows the profile-path security foundation."
+)]
+mod profile_path;
+#[allow(
+    dead_code,
+    reason = "Stage 3 storage lifecycle wiring follows the profile-path security foundation"
+)]
+mod storage;
 
 fn run() -> ExitCode {
+    if profile_path::ProfilePaths::validate_process_arguments().is_err() {
+        return ExitCode::FAILURE;
+    }
     exit_code(ipc::run_stdio())
 }
 
