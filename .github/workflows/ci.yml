@@ -16,10 +16,12 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24.7.0
+      - run: rustup toolchain install 1.97.0 --profile minimal
       - run: corepack pnpm install --frozen-lockfile
       - run: corepack pnpm lint
       - run: corepack pnpm typecheck
       - run: corepack pnpm test
+      - run: xvfb-run -a corepack pnpm security-test
       - run: xvfb-run -a corepack pnpm smoke
 
   rust:
