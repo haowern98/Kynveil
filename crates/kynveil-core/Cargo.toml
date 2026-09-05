@@ -7,9 +7,11 @@ rust-version.workspace = true
 build = "build.rs"
 
 [dependencies]
+ed25519-dalek = "=3.0.0"
 getrandom = "=0.3.4"
 hkdf = "=0.13.0"
 libsqlite3-sys = { version = "=0.38.2", features = ["bundled_bindings", "sqlcipher"] }
+minicbor = { version = "=2.3.0", default-features = false, features = ["alloc"] }
 prost = "=0.14.4"
 rusqlite = { version = "=0.40.2", default-features = false }
 sha2 = "=0.11.0"
