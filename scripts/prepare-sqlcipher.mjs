@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { access, mkdir, readFile, rename, rmdir, stat, writeFile } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { access, cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
@@ -27,6 +27,7 @@ export function validateArchiveEntries(entries) {
     `${archiveRoot}/LICENSE.md`,
     `${archiveRoot}/Makefile.msc`,
     `${archiveRoot}/VERSION`,
+    `${archiveRoot}/configure`,
     `${archiveRoot}/src/sqlcipher.c`
   ])
 
@@ -42,6 +43,9 @@ export function validateArchiveEntries(entries) {
       !path.startsWith(`${archiveRoot}/`)
     ) {
       throw new Error(`SQLCipher archive contains an unexpected path: ${entry}`)
+    }
+    if (path === `${archiveRoot}/sqlite3.c`) {
+      throw new Error('reviewed SQLCipher source archive must not contain a generated sqlite3.c')
     }
     required.delete(path)
   }
@@ -80,14 +84,43 @@ function extractArchive(archive, destination) {
 }
 
 async function validateSourceTree(sourceDirectory) {
-  const expectedFiles = ['LICENSE.md', 'Makefile.msc', 'src/sqlcipher.c']
+  const expectedFiles = ['LICENSE.md', 'Makefile.msc', 'configure', 'src/sqlcipher.c']
   await Promise.all(expectedFiles.map(async (file) => {
     await stat(join(sourceDirectory, file))
   }))
+  try {
+    await stat(join(sourceDirectory, 'sqlite3.c'))
+    throw new Error('reviewed SQLCipher source cache was modified with a generated sqlite3.c')
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
   const sqliteVersion = (await readFile(join(sourceDirectory, 'VERSION'), 'utf8')).trim()
   if (sqliteVersion !== SQLITE_VERSION) {
     throw new Error(`reviewed SQLCipher source must contain SQLite ${SQLITE_VERSION}, found ${sqliteVersion}`)
   }
+}
+
+/**
+ * Copies verified source into an isolated build directory before native tools
+ * generate platform-specific files such as the SQLite amalgamation.
+ */
+export async function prepareSqlcipherBuildSource({ sourceDirectory, buildDirectory }) {
+  const source = resolve(sourceDirectory)
+  const build = resolve(buildDirectory)
+  const buildFromSource = relative(source, build)
+  const sourceFromBuild = relative(build, source)
+  if (
+    buildFromSource === '' ||
+    sourceFromBuild === '' ||
+    (!isAbsolute(buildFromSource) && !buildFromSource.startsWith('..')) ||
+    (!isAbsolute(sourceFromBuild) && !sourceFromBuild.startsWith('..'))
+  ) {
+    throw new Error('SQLCipher build directory must be separate from the verified source')
+  }
+
+  await rm(build, { recursive: true, force: true })
+  await mkdir(dirname(build), { recursive: true })
+  await cp(source, build, { recursive: true, force: false, errorOnExist: true })
 }
 
 async function downloadVerifiedArchive(archive) {
@@ -133,23 +166,27 @@ export async function prepareSqlcipherSource({ allowDownload = true } = {}) {
   }
 
   validateArchiveEntries(tarEntries(archive))
-  if (await exists(sourceDirectory)) {
-    await validateSourceTree(sourceDirectory)
-  } else {
+  let sourceNeedsExtraction = !(await exists(sourceDirectory))
+  if (!sourceNeedsExtraction) {
+    try {
+      await validateSourceTree(sourceDirectory)
+    } catch {
+      await rm(sourceDirectory, { recursive: true, force: true })
+      sourceNeedsExtraction = true
+    }
+  }
+  if (sourceNeedsExtraction) {
     const stagingDirectory = join(cacheDirectory, `.source-${process.pid}-${Date.now()}`)
     await mkdir(stagingDirectory)
     extractArchive(archive, stagingDirectory)
     const extractedDirectory = join(stagingDirectory, archiveRoot)
     await validateSourceTree(extractedDirectory)
-    try {
-      await rename(extractedDirectory, sourceDirectory)
-    } catch (error) {
-      // Windows can report EPERM after an antivirus scanner observes a completed
-      // same-volume rename. Accept only a fully revalidated published directory.
-      if (!(await exists(sourceDirectory))) throw error
-      await validateSourceTree(sourceDirectory)
-    }
-    await rmdir(stagingDirectory)
+    // Windows Node.js can reject a directory rename here with EPERM even though
+    // the destination parent permits the operation. A copied tree is never
+    // trusted until the complete source validation below succeeds.
+    await cp(extractedDirectory, sourceDirectory, { recursive: true, force: false, errorOnExist: true })
+    await validateSourceTree(sourceDirectory)
+    await rm(stagingDirectory, { recursive: true, force: true })
   }
 
   return { archive, sourceDirectory }

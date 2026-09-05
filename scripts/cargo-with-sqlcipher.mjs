@@ -3,7 +3,7 @@ import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
-import { prepareSqlcipherSource } from './prepare-sqlcipher.mjs'
+import { prepareSqlcipherBuildSource, prepareSqlcipherSource } from './prepare-sqlcipher.mjs'
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const controlledRoot = resolve(repositoryRoot, 'target', 'kynveil-native', 'sqlcipher', '4.18.0')
@@ -26,6 +26,18 @@ export function validateNativeArtifact(artifact, root = controlledRoot) {
   return artifactDirectory
 }
 
+/** Resolves the target triple used to isolate controlled native build inputs. */
+export function resolveCargoTarget(arguments_, rustcVersion) {
+  const targetIndex = arguments_.indexOf('--target')
+  const explicitTarget = targetIndex === -1 ? undefined : arguments_[targetIndex + 1]
+  const inlineTarget = arguments_.find((argument) => argument.startsWith('--target='))?.slice('--target='.length)
+  const target = explicitTarget ?? inlineTarget ?? /^host:\s+([^\s]+)$/mu.exec(rustcVersion)?.[1]
+  if (target === undefined || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(target)) {
+    throw new Error('Cargo target must be a valid target triple')
+  }
+  return target
+}
+
 function run(command, arguments_, environment) {
   const result = spawnSync(command, arguments_, {
     cwd: repositoryRoot,
@@ -36,8 +48,21 @@ function run(command, arguments_, environment) {
   if (result.status !== 0) process.exit(result.status ?? 1)
 }
 
-function helperBuildArguments(arguments_) {
+function rustcVersion() {
+  const result = spawnSync(process.platform === 'win32' ? 'rustc.exe' : 'rustc', ['-vV'], {
+    cwd: repositoryRoot,
+    encoding: 'utf8'
+  })
+  if (result.error !== undefined) throw result.error
+  if (result.status !== 0) throw new Error(`unable to identify the Rust host target: ${result.stderr}`)
+  return result.stdout
+}
+
+export function helperBuildArguments(arguments_) {
   const helperArguments = ['build', '--package', 'kynveil-sqlcipher-native']
+  for (const lockControl of ['--locked', '--offline', '--frozen']) {
+    if (arguments_.includes(lockControl)) helperArguments.push(lockControl)
+  }
   if (arguments_.includes('--release')) helperArguments.push('--release')
   const targetIndex = arguments_.indexOf('--target')
   if (targetIndex !== -1 && arguments_[targetIndex + 1] !== undefined) {
@@ -50,7 +75,17 @@ async function main() {
   const arguments_ = process.argv.slice(2)
   if (arguments_.length === 0) throw new Error('cargo arguments are required')
   const prepared = await prepareSqlcipherSource()
-  const environment = { ...process.env, KYNVEIL_SQLCIPHER_SOURCE_DIR: prepared.sourceDirectory }
+  const target = resolveCargoTarget(arguments_, rustcVersion())
+  const buildDirectory = resolve(controlledRoot, 'build', target)
+  await prepareSqlcipherBuildSource({
+    sourceDirectory: prepared.sourceDirectory,
+    buildDirectory
+  })
+  const environment = {
+    ...process.env,
+    KYNVEIL_SQLCIPHER_BUILD_DIR: buildDirectory,
+    KYNVEIL_SQLCIPHER_SOURCE_DIR: prepared.sourceDirectory
+  }
   delete environment.OPENSSL_DIR
   delete environment.OPENSSL_INCLUDE_DIR
   delete environment.OPENSSL_LIB_DIR
