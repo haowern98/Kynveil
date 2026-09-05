@@ -5,12 +5,16 @@ use std::{
     path::Path,
 };
 
+use ed25519_dalek::SigningKey;
 use hkdf::Hkdf;
 use rusqlite::{Connection, OpenFlags, params};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-use crate::profile_path::ProfilePaths;
+use crate::{
+    identity::{IdentityRecord, encode_device_credential, verify_device_credential},
+    profile_path::ProfilePaths,
+};
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
 const DATABASE_KEY_EPOCH: u64 = 1;
@@ -20,23 +24,39 @@ const METADATA_VERSION: u8 = 1;
 const METADATA_LENGTH: usize = 36;
 const EXPECTED_CIPHER_VERSION: &str = "4.18.0 community";
 
-/// Non-secret lifecycle state recorded both beside and inside the encrypted profile.
+/// Non-secret external marker for a database-key rotation in progress.
+///
+/// The encrypted database always records [`Self::Stable`].  A marker is deliberately kept
+/// outside the database so startup can decide which of the two bounded key epochs to open after
+/// an interrupted rename, before it has selected an authoritative database file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TransitionState {
     /// The profile has no pending storage transition.
     Stable,
+    /// The current database was verified and a replacement may be created.
+    RotationPrepared,
+    /// The replacement database was independently verified before the swap.
+    ReplacementVerified,
+    /// The replacement was installed and awaits final verification and cleanup.
+    SwapCompleted,
 }
 
 impl TransitionState {
     fn encoded(self) -> u8 {
         match self {
             Self::Stable => 0,
+            Self::RotationPrepared => 1,
+            Self::ReplacementVerified => 2,
+            Self::SwapCompleted => 3,
         }
     }
 
     fn decode(value: u8) -> Result<Self, StorageError> {
         match value {
             0 => Ok(Self::Stable),
+            1 => Ok(Self::RotationPrepared),
+            2 => Ok(Self::ReplacementVerified),
+            3 => Ok(Self::SwapCompleted),
             _ => Err(StorageError::MalformedMetadata),
         }
     }
@@ -58,6 +78,13 @@ impl ProfileMetadata {
             db_key_epoch: DATABASE_KEY_EPOCH,
             schema_version: CURRENT_SCHEMA_VERSION,
             transition: TransitionState::Stable,
+        }
+    }
+
+    fn stable(self) -> Self {
+        Self {
+            transition: TransitionState::Stable,
+            ..self
         }
     }
 
@@ -129,6 +156,99 @@ pub(crate) struct OpenedDatabase {
 }
 
 impl OpenedDatabase {
+    pub(crate) fn store_identity(&self, identity: &IdentityRecord) -> Result<(), StorageError> {
+        let credential = encode_device_credential(&identity.device_credential)
+            .map_err(|_| StorageError::CorruptProfile)?;
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE;")
+            .map_err(|_| StorageError::DatabaseIo)?;
+        let result = (|| {
+            self.connection
+                .execute(
+                    "INSERT INTO root_identity (singleton, signing_seed, public_key) VALUES (1, ?1, ?2)",
+                    params![identity.root_signing_seed.as_slice(), identity.root_public_key.as_slice()],
+                )
+                .map_err(|_| StorageError::DatabaseIo)?;
+            self.connection
+                .execute(
+                    "INSERT INTO device_identity (device_id, signing_seed, credential, credential_signature) VALUES (?1, ?2, ?3, ?4)",
+                    params![identity.device_credential.device_id.as_slice(), identity.device_signing_seed.as_slice(), credential, identity.device_credential_signature.as_slice()],
+                )
+                .map_err(|_| StorageError::DatabaseIo)?;
+            self.connection
+                .execute_batch("COMMIT;")
+                .map_err(|_| StorageError::DatabaseIo)
+        })();
+        if result.is_err() {
+            let _ = self.connection.execute_batch("ROLLBACK;");
+        }
+        result
+    }
+
+    pub(crate) fn load_identity(&self) -> Result<IdentityRecord, StorageError> {
+        let root = self
+            .connection
+            .query_row(
+                "SELECT signing_seed, public_key FROM root_identity WHERE singleton = 1",
+                [],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .map_err(|_| StorageError::CorruptProfile)?;
+        let device = self
+            .connection
+            .query_row(
+                "SELECT signing_seed, credential, credential_signature FROM device_identity",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .map_err(|_| StorageError::CorruptProfile)?;
+        let root_signing_seed: [u8; 32] = root
+            .0
+            .try_into()
+            .map_err(|_| StorageError::CorruptProfile)?;
+        let root_public_key: [u8; 32] = root
+            .1
+            .try_into()
+            .map_err(|_| StorageError::CorruptProfile)?;
+        let device_signing_seed: [u8; 32] = device
+            .0
+            .try_into()
+            .map_err(|_| StorageError::CorruptProfile)?;
+        let signature: [u8; 64] = device
+            .2
+            .try_into()
+            .map_err(|_| StorageError::CorruptProfile)?;
+        if SigningKey::from_bytes(&root_signing_seed)
+            .verifying_key()
+            .to_bytes()
+            != root_public_key
+        {
+            return Err(StorageError::CorruptProfile);
+        }
+        let credential = verify_device_credential(&root_public_key, &device.1, &signature)
+            .map_err(|_| StorageError::CorruptProfile)?;
+        if SigningKey::from_bytes(&device_signing_seed)
+            .verifying_key()
+            .to_bytes()
+            != credential.device_signing_public_key
+        {
+            return Err(StorageError::CorruptProfile);
+        }
+        Ok(IdentityRecord {
+            root_signing_seed: Zeroizing::new(root_signing_seed),
+            root_public_key,
+            device_signing_seed: Zeroizing::new(device_signing_seed),
+            device_credential: credential,
+            device_credential_signature: signature,
+        })
+    }
+
     /// Checkpoint WAL content and close the only authoritative profile connection.
     pub(crate) fn checkpoint_and_close(self) -> Result<(), StorageError> {
         self.connection
@@ -250,7 +370,11 @@ pub(crate) fn open_database(
     paths: &ProfilePaths,
     profile_master_secret: &Zeroizing<[u8; 32]>,
 ) -> Result<OpenedDatabase, StorageError> {
+    recover_rotation(paths, profile_master_secret)?;
     let metadata = read_metadata(&paths.metadata)?;
+    if metadata.transition != TransitionState::Stable {
+        return Err(StorageError::CorruptProfile);
+    }
     if metadata.schema_version > CURRENT_SCHEMA_VERSION {
         return Err(StorageError::UnsupportedSchema);
     }
@@ -258,12 +382,320 @@ pub(crate) fn open_database(
         return Err(StorageError::CorruptProfile);
     }
 
-    let key = derive_database_key(profile_master_secret, &metadata);
-    let connection =
-        open_keyed_connection(&paths.database, &key, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    open_database_at(&paths.database, profile_master_secret, &metadata)
+}
+
+/// Copy the encrypted database artefacts and bounded non-secret metadata to a new directory.
+///
+/// The destination must not already exist, so this operation never overwrites a user-selected
+/// path. The OS-keystore PMS, plaintext, and private-key material outside `SQLCipher` are never
+/// included.
+pub(crate) fn export_encrypted_profile(
+    paths: &ProfilePaths,
+    destination: &Path,
+) -> Result<(), StorageError> {
+    fs::create_dir(destination).map_err(|_| StorageError::MetadataIo)?;
+    for source in [
+        &paths.metadata,
+        &paths.database,
+        &paths.database_wal,
+        &paths.database_shm,
+    ] {
+        let metadata = match fs::symlink_metadata(source) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(StorageError::MetadataIo),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(StorageError::MetadataIo);
+        }
+        let name = source.file_name().ok_or(StorageError::MetadataIo)?;
+        fs::copy(source, destination.join(name)).map_err(|_| StorageError::MetadataIo)?;
+    }
+    Ok(())
+}
+
+/// Non-sensitive storage facts suitable for local support diagnostics.
+///
+/// This intentionally excludes filesystem paths, profile identifiers, key material, plaintext,
+/// and database contents. Callers must not combine it with unbounded operating-system errors.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StorageDiagnostics {
+    pub(crate) schema_version: u32,
+    pub(crate) db_key_epoch: u64,
+    pub(crate) cipher_version: String,
+    pub(crate) cipher_provider: String,
+}
+
+/// Read the bounded storage facts available only after a profile has passed its unlock checks.
+pub(crate) fn sanitized_diagnostics(
+    paths: &ProfilePaths,
+    profile_master_secret: &Zeroizing<[u8; 32]>,
+) -> Result<StorageDiagnostics, StorageError> {
+    let database = open_database(paths, profile_master_secret)?;
+    let metadata = read_metadata(&paths.metadata)?;
+    let diagnostics = StorageDiagnostics {
+        schema_version: metadata.schema_version,
+        db_key_epoch: metadata.db_key_epoch,
+        cipher_version: pragma_text(&database.connection, "cipher_version")?,
+        cipher_provider: pragma_text(&database.connection, "cipher_provider")?,
+    };
+    database.checkpoint_and_close()?;
+    Ok(diagnostics)
+}
+
+pub(crate) fn rotate_database_key(
+    paths: &ProfilePaths,
+    profile_master_secret: &Zeroizing<[u8; 32]>,
+) -> Result<(), StorageError> {
+    let metadata = read_metadata(&paths.metadata)?;
+    if metadata.transition != TransitionState::Stable {
+        return Err(StorageError::CorruptProfile);
+    }
+    let next_epoch = metadata
+        .db_key_epoch
+        .checked_add(1)
+        .filter(|epoch| i64::try_from(*epoch).is_ok())
+        .ok_or(StorageError::UnsupportedMetadata)?;
+    let source = open_database(paths, profile_master_secret)?;
+    let identity = source.load_identity()?;
+    source.checkpoint_and_close()?;
+    remove_database_sidecars(paths)?;
+
+    let next = ProfileMetadata {
+        db_key_epoch: next_epoch,
+        ..metadata
+    }
+    .stable();
+    write_metadata_atomically(
+        &paths.metadata,
+        &ProfileMetadata {
+            transition: TransitionState::RotationPrepared,
+            ..metadata
+        },
+    )?;
+    create_verified_replacement(paths, profile_master_secret, &next, &identity)?;
+    write_metadata_atomically(
+        &paths.metadata,
+        &ProfileMetadata {
+            transition: TransitionState::ReplacementVerified,
+            ..metadata
+        },
+    )?;
+
+    let replacement = rotation_replacement_path(paths);
+    let previous = rotation_previous_path(paths);
+    fs::rename(&paths.database, &previous).map_err(|_| StorageError::DatabaseIo)?;
+    fs::rename(&replacement, &paths.database).map_err(|_| StorageError::DatabaseIo)?;
+    write_metadata_atomically(
+        &paths.metadata,
+        &ProfileMetadata {
+            transition: TransitionState::SwapCompleted,
+            ..next
+        },
+    )?;
+    recover_rotation(paths, profile_master_secret)
+}
+
+fn recover_rotation(
+    paths: &ProfilePaths,
+    profile_master_secret: &Zeroizing<[u8; 32]>,
+) -> Result<(), StorageError> {
+    let marker = read_metadata(&paths.metadata)?;
+    match marker.transition {
+        TransitionState::Stable => Ok(()),
+        TransitionState::RotationPrepared => {
+            remove_database_artifact(&rotation_replacement_path(paths))?;
+            if database_artifact_exists(&rotation_previous_path(paths))? {
+                return Err(StorageError::CorruptProfile);
+            }
+            validate_database_at(
+                paths.database.as_path(),
+                profile_master_secret,
+                &marker.stable(),
+            )?;
+            write_metadata_atomically(&paths.metadata, &marker.stable())
+        }
+        TransitionState::ReplacementVerified => {
+            let current =
+                opens_database_at(&paths.database, profile_master_secret, &marker.stable());
+            let next = rotation_successor_metadata(&marker)?;
+            if current {
+                remove_database_artifact(&rotation_replacement_path(paths))?;
+                remove_database_artifact(&rotation_previous_path(paths))?;
+                write_metadata_atomically(&paths.metadata, &marker.stable())
+            } else if opens_database_at(&paths.database, profile_master_secret, &next) {
+                remove_database_artifact(&rotation_replacement_path(paths))?;
+                remove_database_artifact(&rotation_previous_path(paths))?;
+                write_metadata_atomically(&paths.metadata, &next)
+            } else {
+                let previous = rotation_previous_path(paths);
+                validate_database_at(&previous, profile_master_secret, &marker.stable())?;
+                if paths
+                    .database
+                    .try_exists()
+                    .map_err(|_| StorageError::DatabaseIo)?
+                {
+                    return Err(StorageError::CorruptProfile);
+                }
+                remove_database_sidecars_at(&previous)?;
+                fs::rename(&previous, &paths.database).map_err(|_| StorageError::DatabaseIo)?;
+                remove_database_artifact(&rotation_replacement_path(paths))?;
+                write_metadata_atomically(&paths.metadata, &marker.stable())
+            }
+        }
+        TransitionState::SwapCompleted => {
+            let next = marker.stable();
+            validate_database_at(&paths.database, profile_master_secret, &next)?;
+            remove_database_artifact(&rotation_replacement_path(paths))?;
+            remove_database_artifact(&rotation_previous_path(paths))?;
+            write_metadata_atomically(&paths.metadata, &next)
+        }
+    }
+}
+
+fn create_verified_replacement(
+    paths: &ProfilePaths,
+    profile_master_secret: &Zeroizing<[u8; 32]>,
+    next: &ProfileMetadata,
+    identity: &IdentityRecord,
+) -> Result<(), StorageError> {
+    let replacement = rotation_replacement_path(paths);
+    let previous = rotation_previous_path(paths);
+    if replacement
+        .try_exists()
+        .map_err(|_| StorageError::DatabaseIo)?
+        || previous
+            .try_exists()
+            .map_err(|_| StorageError::DatabaseIo)?
+    {
+        return Err(StorageError::ExistingProfile);
+    }
+    let key = derive_database_key(profile_master_secret, next);
+    let connection = open_keyed_connection(
+        &replacement,
+        &key,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+    )?;
+    create_schema(&connection, next)?;
+    let replacement_database = OpenedDatabase { connection };
+    replacement_database.store_identity(identity)?;
+    replacement_database.checkpoint_and_close()?;
+    let replacement_database = open_database_at(&replacement, profile_master_secret, next)?;
+    replacement_database.load_identity()?;
+    replacement_database.checkpoint_and_close()?;
+    remove_database_sidecars_at(&replacement)
+}
+
+fn rotation_successor_metadata(marker: &ProfileMetadata) -> Result<ProfileMetadata, StorageError> {
+    let db_key_epoch = marker
+        .db_key_epoch
+        .checked_add(1)
+        .filter(|epoch| i64::try_from(*epoch).is_ok())
+        .ok_or(StorageError::UnsupportedMetadata)?;
+    Ok(ProfileMetadata {
+        db_key_epoch,
+        ..marker.stable()
+    })
+}
+
+fn rotation_replacement_path(paths: &ProfilePaths) -> std::path::PathBuf {
+    paths.database.with_file_name("profile.db.rotation-new")
+}
+
+fn rotation_previous_path(paths: &ProfilePaths) -> std::path::PathBuf {
+    paths.database.with_file_name("profile.db.rotation-old")
+}
+
+fn open_database_at(
+    path: &Path,
+    profile_master_secret: &Zeroizing<[u8; 32]>,
+    metadata: &ProfileMetadata,
+) -> Result<OpenedDatabase, StorageError> {
+    let key = derive_database_key(profile_master_secret, metadata);
+    let connection = open_keyed_connection(path, &key, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     verify_runtime_security(&connection)?;
-    verify_embedded_metadata(&connection, &metadata)?;
+    migrate_database(&connection)?;
+    verify_embedded_metadata(&connection, metadata)?;
     Ok(OpenedDatabase { connection })
+}
+
+fn opens_database_at(
+    path: &Path,
+    profile_master_secret: &Zeroizing<[u8; 32]>,
+    metadata: &ProfileMetadata,
+) -> bool {
+    validate_database_at(path, profile_master_secret, metadata).is_ok()
+}
+
+fn validate_database_at(
+    path: &Path,
+    profile_master_secret: &Zeroizing<[u8; 32]>,
+    metadata: &ProfileMetadata,
+) -> Result<(), StorageError> {
+    open_database_at(path, profile_master_secret, metadata)?.checkpoint_and_close()
+}
+
+fn remove_database_sidecars(paths: &ProfilePaths) -> Result<(), StorageError> {
+    remove_database_sidecars_at(&paths.database)
+}
+
+fn remove_database_sidecars_at(database: &Path) -> Result<(), StorageError> {
+    let file_name = database.file_name().ok_or(StorageError::DatabaseIo)?;
+    let file_name = file_name.to_string_lossy();
+    remove_if_regular_file(&database.with_file_name(format!("{file_name}-wal")))?;
+    remove_if_regular_file(&database.with_file_name(format!("{file_name}-shm")))
+}
+
+fn remove_database_artifact(database: &Path) -> Result<(), StorageError> {
+    remove_database_sidecars_at(database)?;
+    remove_if_regular_file(database)
+}
+
+fn database_artifact_exists(database: &Path) -> Result<bool, StorageError> {
+    let file_name = database.file_name().ok_or(StorageError::DatabaseIo)?;
+    let file_name = file_name.to_string_lossy();
+    for path in [
+        database.to_path_buf(),
+        database.with_file_name(format!("{file_name}-wal")),
+        database.with_file_name(format!("{file_name}-shm")),
+    ] {
+        match fs::symlink_metadata(path) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(StorageError::DatabaseIo),
+        }
+    }
+    Ok(false)
+}
+
+fn remove_if_regular_file(path: &Path) -> Result<(), StorageError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(StorageError::CorruptProfile)
+        }
+        Ok(_) => fs::remove_file(path).map_err(|_| StorageError::DatabaseIo),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(StorageError::DatabaseIo),
+    }
+}
+
+fn migrate_database(connection: &Connection) -> Result<(), StorageError> {
+    let version = connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+        .map_err(|_| StorageError::CorruptProfile)?;
+    if version > CURRENT_SCHEMA_VERSION {
+        return Err(StorageError::UnsupportedSchema);
+    }
+    if version == CURRENT_SCHEMA_VERSION {
+        return Ok(());
+    }
+    if version != 0 {
+        return Err(StorageError::UnsupportedSchema);
+    }
+    connection
+        .execute_batch("BEGIN IMMEDIATE; PRAGMA user_version = 1; COMMIT;")
+        .map_err(|_| StorageError::DatabaseIo)
 }
 
 fn profile_evidence_exists(paths: &ProfilePaths) -> Result<bool, StorageError> {
@@ -609,8 +1041,11 @@ mod tests {
     use crate::profile_path::ProfilePaths;
 
     use super::{
-        ProfileMetadata, StorageError, apply_sqlcipher_key, create_database, derive_database_key,
-        open_database, pragma_text, read_metadata,
+        ProfileMetadata, StorageError, TransitionState, apply_sqlcipher_key, create_database,
+        create_verified_replacement, derive_database_key, export_encrypted_profile, open_database,
+        pragma_text, read_metadata, remove_database_sidecars, rotate_database_key,
+        rotation_previous_path, rotation_replacement_path, rotation_successor_metadata,
+        sanitized_diagnostics, write_metadata_atomically,
     };
 
     const TEST_PROFILE_MASTER_SECRET: [u8; 32] = [0x0b; 32];
@@ -623,6 +1058,7 @@ mod tests {
         0x12, 0x61, 0x89, 0x27, 0xa5, 0x0a, 0xf2, 0x90, 0x46, 0xa9, 0x79, 0x5c, 0xce, 0xac, 0x00,
         0xb3, 0xb1,
     ];
+    const PRIVATE_EXPORT_MARKER: &[u8; 32] = b"KYNVEIL-EXPORT-PRIVATE-MARKER!!!";
 
     struct TestProfile {
         root: PathBuf,
@@ -656,6 +1092,121 @@ mod tests {
 
     fn test_secret() -> Zeroizing<[u8; 32]> {
         Zeroizing::new(TEST_PROFILE_MASTER_SECRET)
+    }
+
+    fn create_verified_rotation_replacement(
+        profile: &TestProfile,
+    ) -> (ProfileMetadata, ProfileMetadata) {
+        let current = read_metadata(&profile.paths.metadata).unwrap();
+        let database = open_database(&profile.paths, &test_secret()).unwrap();
+        let identity = database.load_identity().unwrap();
+        database.checkpoint_and_close().unwrap();
+        remove_database_sidecars(&profile.paths).unwrap();
+        let next = rotation_successor_metadata(&current).unwrap();
+        create_verified_replacement(&profile.paths, &test_secret(), &next, &identity).unwrap();
+        (current, next)
+    }
+
+    fn populated_profile() -> TestProfile {
+        let profile = TestProfile::new();
+        let database = create_database(&profile.paths, &test_secret(), &metadata()).unwrap();
+        database
+            .store_identity(&crate::identity::create_identity(1_700_000_000).unwrap())
+            .unwrap();
+        database.checkpoint_and_close().unwrap();
+        profile
+    }
+
+    fn reopen_and_close(profile: &TestProfile) {
+        open_database(&profile.paths, &test_secret())
+            .unwrap()
+            .checkpoint_and_close()
+            .unwrap();
+    }
+
+    fn set_rotation_marker(
+        profile: &TestProfile,
+        metadata: ProfileMetadata,
+        state: TransitionState,
+    ) {
+        write_metadata_atomically(
+            &profile.paths.metadata,
+            &ProfileMetadata {
+                transition: state,
+                ..metadata
+            },
+        )
+        .unwrap();
+    }
+
+    fn recovers_prepared_rotation() {
+        let profile = populated_profile();
+        let (stable, _) = create_verified_rotation_replacement(&profile);
+        set_rotation_marker(&profile, stable, TransitionState::RotationPrepared);
+        reopen_and_close(&profile);
+        assert_eq!(read_metadata(&profile.paths.metadata).unwrap(), stable);
+        assert!(!rotation_replacement_path(&profile.paths).exists());
+    }
+
+    fn recovers_verified_replacement() {
+        let profile = populated_profile();
+        let (stable, _) = create_verified_rotation_replacement(&profile);
+        set_rotation_marker(&profile, stable, TransitionState::ReplacementVerified);
+        reopen_and_close(&profile);
+        assert_eq!(read_metadata(&profile.paths.metadata).unwrap(), stable);
+        assert!(!rotation_replacement_path(&profile.paths).exists());
+    }
+
+    fn recovers_after_source_rename() {
+        let profile = populated_profile();
+        let (stable, _) = create_verified_rotation_replacement(&profile);
+        set_rotation_marker(&profile, stable, TransitionState::ReplacementVerified);
+        fs::rename(
+            &profile.paths.database,
+            rotation_previous_path(&profile.paths),
+        )
+        .unwrap();
+        reopen_and_close(&profile);
+        assert_eq!(read_metadata(&profile.paths.metadata).unwrap(), stable);
+        assert!(profile.paths.database.is_file());
+    }
+
+    fn recovers_after_replacement_install() {
+        let profile = populated_profile();
+        let (stable, next) = create_verified_rotation_replacement(&profile);
+        set_rotation_marker(&profile, stable, TransitionState::ReplacementVerified);
+        fs::rename(
+            &profile.paths.database,
+            rotation_previous_path(&profile.paths),
+        )
+        .unwrap();
+        fs::rename(
+            rotation_replacement_path(&profile.paths),
+            &profile.paths.database,
+        )
+        .unwrap();
+        reopen_and_close(&profile);
+        assert_eq!(read_metadata(&profile.paths.metadata).unwrap(), next);
+        assert!(!rotation_previous_path(&profile.paths).exists());
+    }
+
+    fn recovers_after_swap_marker() {
+        let profile = populated_profile();
+        let (_, next) = create_verified_rotation_replacement(&profile);
+        fs::rename(
+            &profile.paths.database,
+            rotation_previous_path(&profile.paths),
+        )
+        .unwrap();
+        fs::rename(
+            rotation_replacement_path(&profile.paths),
+            &profile.paths.database,
+        )
+        .unwrap();
+        set_rotation_marker(&profile, next, TransitionState::SwapCompleted);
+        reopen_and_close(&profile);
+        assert_eq!(read_metadata(&profile.paths.metadata).unwrap(), next);
+        assert!(!rotation_previous_path(&profile.paths).exists());
     }
 
     #[test]
@@ -769,6 +1320,24 @@ mod tests {
     }
 
     #[test]
+    fn persists_and_verifies_the_single_device_identity_across_a_restart() {
+        let profile = TestProfile::new();
+        let identity = crate::identity::create_identity(1_700_000_000).unwrap();
+        let database = create_database(&profile.paths, &test_secret(), &metadata()).unwrap();
+        database.store_identity(&identity).unwrap();
+        database.checkpoint_and_close().unwrap();
+
+        let reopened = open_database(&profile.paths, &test_secret()).unwrap();
+        let restored = reopened.load_identity().unwrap();
+        assert_eq!(restored.root_public_key, identity.root_public_key);
+        assert_eq!(restored.device_credential, identity.device_credential);
+        assert_eq!(
+            restored.device_credential_signature,
+            identity.device_credential_signature
+        );
+    }
+
+    #[test]
     fn rejects_unkeyed_and_wrong_key_database_access() {
         let profile = TestProfile::new();
         let metadata = metadata();
@@ -845,6 +1414,16 @@ mod tests {
     }
 
     #[test]
+    fn upgrades_the_only_supported_legacy_schema_forward_and_never_downgrades() {
+        let profile = TestProfile::new();
+        let database = create_database(&profile.paths, &test_secret(), &metadata()).unwrap();
+        database.set_user_version_for_test(0).unwrap();
+        database.checkpoint_and_close().unwrap();
+
+        assert!(open_database(&profile.paths, &test_secret()).is_ok());
+    }
+
+    #[test]
     fn leaves_no_known_plaintext_marker_in_database_or_journal_files() {
         const MARKER: &[u8; 32] = b"KYNVEIL-STAGE3-PLAINTEXT-MARKER!";
 
@@ -866,5 +1445,75 @@ mod tests {
             }
         }
         database.checkpoint_and_close().unwrap();
+    }
+
+    #[test]
+    fn exports_only_the_encrypted_profile_artifacts() {
+        let profile = TestProfile::new();
+        let database = create_database(&profile.paths, &test_secret(), &metadata()).unwrap();
+        database
+            .insert_root_identity_for_test(PRIVATE_EXPORT_MARKER)
+            .unwrap();
+        database.checkpoint_and_close().unwrap();
+        fs::write(
+            profile.paths.root.join("profile-master-v1"),
+            b"PMS-MUST-NOT-EXPORT",
+        )
+        .unwrap();
+        let export = profile.root.join("encrypted-export");
+
+        export_encrypted_profile(&profile.paths, &export).unwrap();
+        assert!(export.join("profile.meta").is_file());
+        assert!(export.join("profile.db").is_file());
+        assert!(!export.join("profile-master-v1").exists());
+        for entry in fs::read_dir(&export).unwrap() {
+            let bytes = fs::read(entry.unwrap().path()).unwrap();
+            assert!(
+                !bytes
+                    .windows(PRIVATE_EXPORT_MARKER.len())
+                    .any(|window| window == PRIVATE_EXPORT_MARKER)
+            );
+            assert!(
+                !bytes
+                    .windows(b"PMS-MUST-NOT-EXPORT".len())
+                    .any(|window| window == b"PMS-MUST-NOT-EXPORT")
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostics_are_limited_to_non_secret_runtime_facts() {
+        let profile = populated_profile();
+        let secret = test_secret();
+        let diagnostics = sanitized_diagnostics(&profile.paths, &secret).unwrap();
+        let rendered = format!("{diagnostics:?}");
+
+        assert_eq!(diagnostics.schema_version, 1);
+        assert_eq!(diagnostics.db_key_epoch, 1);
+        assert_eq!(diagnostics.cipher_provider, "openssl");
+        assert!(!rendered.contains(&format!("{TEST_PROFILE_ID:?}")));
+        assert!(!rendered.contains(&format!("{secret:?}")));
+        assert!(!rendered.contains(&profile.root.display().to_string()));
+    }
+
+    #[test]
+    fn rotates_the_database_key_to_the_next_epoch() {
+        let profile = populated_profile();
+
+        rotate_database_key(&profile.paths, &test_secret()).unwrap();
+        assert_eq!(
+            read_metadata(&profile.paths.metadata).unwrap().db_key_epoch,
+            2
+        );
+        assert!(open_database(&profile.paths, &test_secret()).is_ok());
+    }
+
+    #[test]
+    fn recovers_every_interrupted_database_key_rotation_state() {
+        recovers_prepared_rotation();
+        recovers_verified_replacement();
+        recovers_after_source_rename();
+        recovers_after_replacement_install();
+        recovers_after_swap_marker();
     }
 }
