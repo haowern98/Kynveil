@@ -1,6 +1,7 @@
 packages:
   - apps/*
 allowBuilds:
+  '@bufbuild/buf': true
   electron: true
   esbuild: true
 minimumReleaseAge: 10080
