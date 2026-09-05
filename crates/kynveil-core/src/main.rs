@@ -2,6 +2,11 @@
 
 use std::process::ExitCode;
 
+#[allow(
+    dead_code,
+    reason = "Stage 3 storage lifecycle wiring follows the identity foundation."
+)]
+mod identity;
 mod ipc;
 #[allow(
     dead_code,
@@ -10,7 +15,7 @@ mod ipc;
 mod profile_path;
 #[allow(
     dead_code,
-    reason = "Stage 3 storage lifecycle wiring follows the profile-path security foundation"
+    reason = "Stage 3 storage lifecycle wiring follows the identity/profile foundation"
 )]
 mod storage;
 
