@@ -6,13 +6,13 @@
   "main": "out/main/index.js",
   "scripts": {
     "build": "corepack pnpm generate && electron-vite build",
-    "dev": "cargo build --package kynveil-core && corepack pnpm build && electron out/main/index.js",
+    "dev": "node ../../scripts/cargo-with-sqlcipher.mjs build --package kynveil-core && corepack pnpm build && electron out/main/index.js",
     "generate": "node ../../scripts/generate-proto.mjs",
     "lint": "corepack pnpm generate && eslint electron.vite.config.ts src",
     "security-test": "corepack pnpm build && electron out/main/security-harness.js",
     "typecheck": "corepack pnpm generate && tsc --noEmit",
-    "test": "corepack pnpm generate && cargo build --package kynveil-core && vitest run",
-    "smoke": "cargo build --package kynveil-core && corepack pnpm build && electron out/main/index.js kynveil-smoke-test"
+    "test": "corepack pnpm generate && node ../../scripts/cargo-with-sqlcipher.mjs build --package kynveil-core && vitest run",
+    "smoke": "node ../../scripts/cargo-with-sqlcipher.mjs build --package kynveil-core && corepack pnpm build && electron out/main/index.js kynveil-smoke-test"
   },
   "dependencies": {
     "@bufbuild/protobuf": "2.14.0",

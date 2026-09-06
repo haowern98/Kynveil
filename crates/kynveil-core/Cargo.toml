@@ -7,8 +7,29 @@ rust-version.workspace = true
 build = "build.rs"
 
 [dependencies]
+base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
+ed25519-dalek = "=3.0.0"
 getrandom = "=0.3.4"
+hkdf = "=0.13.0"
+keyring-core = "=1.0.0"
+libsqlite3-sys = { version = "=0.38.2", features = ["bundled_bindings", "sqlcipher"] }
+minicbor = { version = "=2.3.0", default-features = false, features = ["alloc"] }
 prost = "=0.14.4"
+rusqlite = { version = "=0.40.2", default-features = false }
+sha2 = "=0.11.0"
+zeroize = "=1.8.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }
+rustix = { version = "=1.1.4", features = ["fs", "process"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "=1.1.4", features = ["fs", "process"] }
+zbus-secret-service-keyring-store = { version = "=1.0.1", features = ["crypto-rust"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "=0.62.2", default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_Threading"] }
+windows-native-keyring-store = "=1.1.0"
 
 [build-dependencies]
 prost-build = "=0.14.4"

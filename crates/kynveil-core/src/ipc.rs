@@ -17,9 +17,15 @@ use std::{
 
 use prost::Message;
 
+use crate::{
+    keyring::ProfileMasterSecretStore,
+    profile::{ProfileController, ProfileState},
+};
+
 use self::proto::{
-    CoreState, Envelope, ErrorCode, ErrorResponse, GetStatusResponse, HelloResponse,
-    ShutdownResponse, envelope,
+    CoreState, Envelope, ErrorCode, ErrorResponse, GetProfileStatusResponse, GetStatusResponse,
+    HelloResponse, LockProfileResponse, ProfileState as ProtoProfileState, ShutdownResponse,
+    UnlockProfileResponse, envelope,
 };
 
 const PROTOCOL_MAJOR: u32 = 1;
@@ -102,7 +108,11 @@ impl Session {
         )
     }
 
-    fn handle(&mut self, request: Envelope) -> Envelope {
+    fn handle<S: ProfileMasterSecretStore>(
+        &mut self,
+        request: Envelope,
+        profile: &mut ProfileController<S>,
+    ) -> Envelope {
         let request_id = request.request_id;
         if request.protocol_major != PROTOCOL_MAJOR || request.protocol_minor != PROTOCOL_MINOR {
             return self.error(
@@ -134,7 +144,26 @@ impl Session {
             }
             envelope::Body::GetStatusRequest(_) if self.handshaken => {
                 envelope::Body::GetStatusResponse(GetStatusResponse {
-                    state: CoreState::Ready.into(),
+                    state: if profile.state() == ProfileState::Unlocked {
+                        CoreState::Ready.into()
+                    } else {
+                        CoreState::Locked.into()
+                    },
+                })
+            }
+            envelope::Body::GetProfileStatusRequest(_) if self.handshaken => {
+                envelope::Body::GetProfileStatusResponse(GetProfileStatusResponse {
+                    state: proto_profile_state(profile.state()).into(),
+                })
+            }
+            envelope::Body::LockProfileRequest(_) if self.handshaken => {
+                envelope::Body::LockProfileResponse(LockProfileResponse {
+                    state: proto_profile_state(profile.lock()).into(),
+                })
+            }
+            envelope::Body::UnlockProfileRequest(_) if self.handshaken => {
+                envelope::Body::UnlockProfileResponse(UnlockProfileResponse {
+                    state: proto_profile_state(profile.unlock()).into(),
                 })
             }
             envelope::Body::ShutdownRequest(_) if self.handshaken => {
@@ -165,6 +194,16 @@ impl Session {
                 message: message.into(),
             }),
         )
+    }
+}
+
+fn proto_profile_state(state: ProfileState) -> ProtoProfileState {
+    match state {
+        ProfileState::Unlocked => ProtoProfileState::Unlocked,
+        ProfileState::Locked => ProtoProfileState::Locked,
+        ProfileState::KeystoreUnavailable => ProtoProfileState::KeystoreUnavailable,
+        ProfileState::Corrupt => ProtoProfileState::Corrupt,
+        ProfileState::Error => ProtoProfileState::Error,
     }
 }
 
@@ -209,7 +248,9 @@ fn decode_envelope(body: &[u8]) -> Result<Envelope, ProtocolError> {
 }
 
 /// Runs the framed IPC service until stdin closes or a shutdown request succeeds.
-pub(crate) fn run_stdio() -> Result<(), &'static str> {
+pub(crate) fn run_stdio<S: ProfileMasterSecretStore + Send>(
+    profile: ProfileController<S>,
+) -> Result<(), &'static str> {
     let mut session_id = [0_u8; SESSION_ID_LENGTH];
     getrandom::fill(&mut session_id).map_err(|_| "randomness unavailable")?;
     let session = Session::new(session_id);
@@ -229,12 +270,13 @@ pub(crate) fn run_stdio() -> Result<(), &'static str> {
         let budget_ref = &budget;
         let worker = scope.spawn(move || -> Result<(), &'static str> {
             let mut session = session;
+            let mut profile = profile;
             while let Ok(queued) = receiver.recv() {
                 budget_ref
                     .lock()
                     .map_err(|_| "IPC queue failed")?
                     .release(queued.bytes);
-                let response = session.handle(queued.envelope);
+                let response = session.handle(queued.envelope, &mut profile);
                 let shutdown = matches!(response.body, Some(envelope::Body::ShutdownResponse(_)));
                 write_frame(
                     &mut *output_ref.lock().map_err(|_| "IPC output failed")?,
@@ -245,7 +287,11 @@ pub(crate) fn run_stdio() -> Result<(), &'static str> {
                     break;
                 }
             }
-            Ok(())
+            if profile.lock() == ProfileState::Error {
+                Err("profile lock failed")
+            } else {
+                Ok(())
+            }
         });
 
         let reader_result = loop {
@@ -317,11 +363,20 @@ fn write_busy(
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{fs, io::Cursor, path::PathBuf};
 
     use prost::Message;
 
-    use super::proto::{Envelope, GetStatusRequest, HelloRequest, envelope};
+    use crate::{
+        keyring::{ProfileMasterSecret, ProfileMasterSecretStore, ProfileMasterSecretStoreError},
+        profile::ProfileController,
+        profile_path::ProfilePaths,
+    };
+
+    use super::proto::{
+        Envelope, GetProfileStatusRequest, GetStatusRequest, HelloRequest, LockProfileRequest,
+        UnlockProfileRequest, envelope,
+    };
     use super::*;
 
     fn request(session_id: &[u8], request_id: u64, body: envelope::Body) -> Envelope {
@@ -344,6 +399,52 @@ mod tests {
         let mut session_id = [0; SESSION_ID_LENGTH];
         getrandom::fill(&mut session_id).unwrap();
         session_id
+    }
+
+    struct UnavailableStore;
+
+    impl ProfileMasterSecretStore for UnavailableStore {
+        fn load(&self) -> Result<ProfileMasterSecret, ProfileMasterSecretStoreError> {
+            Err(ProfileMasterSecretStoreError::Unavailable)
+        }
+
+        fn store(&self, _: &ProfileMasterSecret) -> Result<(), ProfileMasterSecretStoreError> {
+            Err(ProfileMasterSecretStoreError::Unavailable)
+        }
+
+        fn delete(&self) -> Result<(), ProfileMasterSecretStoreError> {
+            Err(ProfileMasterSecretStoreError::Unavailable)
+        }
+    }
+
+    struct TestController {
+        root: PathBuf,
+        profile: ProfileController<UnavailableStore>,
+    }
+
+    impl Drop for TestController {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn controller() -> TestController {
+        let mut nonce = [0_u8; 8];
+        getrandom::fill(&mut nonce).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "kynveil-ipc-test-{}-{}",
+            std::process::id(),
+            u64::from_be_bytes(nonce)
+        ));
+        fs::create_dir(&path).unwrap();
+        TestController {
+            profile: ProfileController::new(
+                ProfilePaths::from_user_data_root(&path).unwrap(),
+                UnavailableStore,
+                1,
+            ),
+            root: path,
+        }
     }
 
     #[test]
@@ -403,6 +504,7 @@ mod tests {
     fn validates_version_session_operation_and_request_identity() {
         let session_id = synthetic_session_id();
         let mut session = Session::new(session_id);
+        let mut controller = controller();
 
         let hello = request(
             &session_id,
@@ -412,7 +514,7 @@ mod tests {
             }),
         );
         assert!(matches!(
-            session.handle(hello).body,
+            session.handle(hello, &mut controller.profile).body,
             Some(envelope::Body::HelloResponse(_))
         ));
 
@@ -422,7 +524,7 @@ mod tests {
             envelope::Body::GetStatusRequest(GetStatusRequest {}),
         );
         assert_error(
-            session.handle(duplicate),
+            session.handle(duplicate, &mut controller.profile),
             proto::ErrorCode::DuplicateRequest,
         );
 
@@ -433,7 +535,10 @@ mod tests {
             2,
             envelope::Body::GetStatusRequest(GetStatusRequest {}),
         );
-        assert_error(session.handle(stale), proto::ErrorCode::StaleSession);
+        assert_error(
+            session.handle(stale, &mut controller.profile),
+            proto::ErrorCode::StaleSession,
+        );
 
         let mut unsupported = request(
             &session_id,
@@ -442,7 +547,7 @@ mod tests {
         );
         unsupported.protocol_major = 2;
         assert_error(
-            session.handle(unsupported),
+            session.handle(unsupported, &mut controller.profile),
             proto::ErrorCode::UnsupportedVersion,
         );
 
@@ -453,7 +558,62 @@ mod tests {
         );
         let mut unknown = unknown;
         unknown.body = None;
-        assert_error(session.handle(unknown), proto::ErrorCode::InvalidRequest);
+        assert_error(
+            session.handle(unknown, &mut controller.profile),
+            proto::ErrorCode::InvalidRequest,
+        );
+    }
+
+    #[test]
+    fn exposes_only_bounded_profile_lifecycle_states() {
+        let session_id = synthetic_session_id();
+        let mut session = Session::new(session_id);
+        let mut controller = controller();
+
+        let hello = request(
+            &session_id,
+            1,
+            envelope::Body::HelloRequest(HelloRequest {
+                client_build: "synthetic-test-client".into(),
+            }),
+        );
+        assert!(matches!(
+            session.handle(hello, &mut controller.profile).body,
+            Some(envelope::Body::HelloResponse(_))
+        ));
+
+        let status = request(
+            &session_id,
+            2,
+            envelope::Body::GetProfileStatusRequest(GetProfileStatusRequest {}),
+        );
+        assert!(matches!(
+            session.handle(status, &mut controller.profile).body,
+            Some(envelope::Body::GetProfileStatusResponse(response))
+                if response.state == ProtoProfileState::KeystoreUnavailable as i32
+        ));
+
+        let lock = request(
+            &session_id,
+            3,
+            envelope::Body::LockProfileRequest(LockProfileRequest {}),
+        );
+        assert!(matches!(
+            session.handle(lock, &mut controller.profile).body,
+            Some(envelope::Body::LockProfileResponse(response))
+                if response.state == ProtoProfileState::Locked as i32
+        ));
+
+        let unlock = request(
+            &session_id,
+            4,
+            envelope::Body::UnlockProfileRequest(UnlockProfileRequest {}),
+        );
+        assert!(matches!(
+            session.handle(unlock, &mut controller.profile).body,
+            Some(envelope::Body::UnlockProfileResponse(response))
+                if response.state == ProtoProfileState::KeystoreUnavailable as i32
+        ));
     }
 
     #[test]

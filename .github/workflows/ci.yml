@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -25,20 +26,97 @@ jobs:
           sudo chown root:root "$sandbox_path"
           sudo chmod 4755 "$sandbox_path"
           test "$(stat -c '%u:%g:%a' "$sandbox_path")" = "0:0:4755"
-      - run: corepack pnpm lint
-      - run: corepack pnpm typecheck
-      - run: corepack pnpm test
-      - run: xvfb-run -a corepack pnpm security-test
-      - run: xvfb-run -a corepack pnpm smoke
+      - run: xvfb-run -a corepack pnpm verify
 
-  rust:
-    runs-on: ubuntu-24.04
+  storage:
+    name: storage (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+            architecture: x86_64
+            target: x86_64-unknown-linux-gnu
+          - name: macos-x86_64
+            runner: macos-15-intel
+            architecture: x86_64
+            target: x86_64-apple-darwin
+          - name: macos-arm64
+            runner: macos-15
+            architecture: arm64
+            target: aarch64-apple-darwin
+          - name: windows-x86_64
+            runner: windows-2025
+            architecture: x86_64
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - run: rustup toolchain install 1.97.0 --profile minimal --component clippy,rustfmt
-      - run: cargo fmt --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace
-      - run: cargo doc --workspace --no-deps
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.7.0
+      - run: rustup toolchain install 1.97.0 --profile minimal
+      - run: corepack pnpm install --frozen-lockfile
+      - name: Verify runner architecture
+        if: runner.os != 'Windows'
+        run: test "$(uname -m)" = "${{ matrix.architecture }}"
+      - name: Verify Windows runner architecture
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: if (-not [Environment]::Is64BitOperatingSystem) { exit 1 }
+      - name: Run Stage 3 storage regressions through controlled native build
+        run: node scripts/cargo-with-sqlcipher.mjs test --package kynveil-core storage::tests
+      - name: Verify controlled native artifact target
         env:
-          RUSTDOCFLAGS: -D warnings
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          node -e "const artifact = require('./target/kynveil-native/sqlcipher/4.18.0/artifact.json'); if (artifact.target !== process.env.EXPECTED_TARGET || !artifact.libDirectory.startsWith(process.cwd())) process.exit(1)"
+      - name: Reject unexpected runtime crypto or SQLite libraries
+        if: runner.os != 'Windows'
+        run: |
+          binary="$(find target/debug/deps -maxdepth 1 -type f -name 'kynveil_core-*' -perm -111 -print -quit)"
+          test -n "$binary"
+          if [ "${{ runner.os }}" = Linux ]; then
+            dependencies="$(ldd "$binary")"
+          else
+            dependencies="$(otool -L "$binary")"
+          fi
+          printf '%s\n' "$dependencies"
+          if printf '%s\n' "$dependencies" | grep -Eiq 'lib(crypto|ssl|sqlcipher|sqlite3)(\.so|\.dylib|\.dll)'; then
+            exit 1
+          fi
+      - name: Reject unexpected runtime crypto or SQLite libraries on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binaries = @(Get-ChildItem -LiteralPath target/debug/deps -Filter 'kynveil_core-*.exe' -File)
+          if ($binaries.Count -eq 0) {
+            throw 'No kynveil_core test executable was produced'
+          }
+
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) {
+            throw 'Visual Studio locator is unavailable'
+          }
+
+          $install = @(& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath) |
+            Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
+            Select-Object -First 1
+          if (-not $install) {
+            throw 'Visual C++ tools installation is unavailable'
+          }
+
+          $dumpbin = Get-ChildItem -LiteralPath $install -Filter dumpbin.exe -Recurse -File |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $dumpbin) {
+            throw 'dumpbin.exe is unavailable'
+          }
+
+          foreach ($binary in $binaries) {
+            $imports = & $dumpbin /DEPENDENTS $binary.FullName 2>&1
+            $imports | ForEach-Object { $_.ToString() }
+            if ($imports -match '(?im)^\s*(?:libcrypto|libssl|sqlcipher|sqlite3)(?:[-_.][^\r\n]*)?\.dll\s*$') {
+              throw "Forbidden dynamic crypto or SQLite DLL import detected in $($binary.Name)"
+            }
+          }
