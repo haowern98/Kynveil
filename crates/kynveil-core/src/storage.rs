@@ -311,6 +311,13 @@ impl OpenedDatabase {
             .map_err(|_| StorageError::DatabaseIo)?;
         Ok(())
     }
+
+    #[cfg(test)]
+    fn create_unrecognized_table_for_test(&self) -> Result<(), StorageError> {
+        self.connection
+            .execute_batch("CREATE TABLE future_state (value BLOB NOT NULL);")
+            .map_err(|_| StorageError::DatabaseIo)
+    }
 }
 
 /// Derive the exact 32-byte `SQLCipher` key for one profile metadata epoch.
@@ -362,6 +369,9 @@ pub(crate) fn create_database(
     create_schema(&connection, metadata)?;
     verify_runtime_security(&connection)?;
     write_metadata_atomically(&paths.metadata, metadata)?;
+    paths
+        .protect_state_files()
+        .map_err(|_| StorageError::MetadataIo)?;
     Ok(OpenedDatabase { connection })
 }
 
@@ -458,6 +468,7 @@ pub(crate) fn rotate_database_key(
         .filter(|epoch| i64::try_from(*epoch).is_ok())
         .ok_or(StorageError::UnsupportedMetadata)?;
     let source = open_database(paths, profile_master_secret)?;
+    ensure_rotation_schema_complete(&source.connection)?;
     let identity = source.load_identity()?;
     source.checkpoint_and_close()?;
     remove_database_sidecars(paths)?;
@@ -585,6 +596,22 @@ fn create_verified_replacement(
     replacement_database.load_identity()?;
     replacement_database.checkpoint_and_close()?;
     remove_database_sidecars_at(&replacement)
+}
+
+fn ensure_rotation_schema_complete(connection: &Connection) -> Result<(), StorageError> {
+    let mut statement = connection
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        .map_err(|_| StorageError::DatabaseIo)?;
+    let tables = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|_| StorageError::DatabaseIo)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| StorageError::DatabaseIo)?;
+    if tables == ["device_identity", "profile_metadata", "root_identity"] {
+        Ok(())
+    } else {
+        Err(StorageError::UnsupportedSchema)
+    }
 }
 
 fn rotation_successor_metadata(marker: &ProfileMetadata) -> Result<ProfileMetadata, StorageError> {
@@ -1319,6 +1346,33 @@ mod tests {
         assert!(open_database(&profile.paths, &test_secret()).is_ok());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn creates_private_database_and_metadata_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let profile = TestProfile::new();
+        let database = create_database(&profile.paths, &test_secret(), &metadata()).unwrap();
+        database.checkpoint_and_close().unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&profile.paths.database)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&profile.paths.metadata)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
     #[test]
     fn persists_and_verifies_the_single_device_identity_across_a_restart() {
         let profile = TestProfile::new();
@@ -1504,6 +1558,20 @@ mod tests {
         assert_eq!(
             read_metadata(&profile.paths.metadata).unwrap().db_key_epoch,
             2
+        );
+        assert!(open_database(&profile.paths, &test_secret()).is_ok());
+    }
+
+    #[test]
+    fn refuses_rotation_when_the_schema_contains_state_it_cannot_copy() {
+        let profile = populated_profile();
+        let database = open_database(&profile.paths, &test_secret()).unwrap();
+        database.create_unrecognized_table_for_test().unwrap();
+        database.checkpoint_and_close().unwrap();
+
+        assert_eq!(
+            rotate_database_key(&profile.paths, &test_secret()),
+            Err(StorageError::UnsupportedSchema)
         );
         assert!(open_database(&profile.paths, &test_secret()).is_ok());
     }
