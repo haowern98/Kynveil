@@ -13,8 +13,6 @@ clippy.pedantic = "deny"
 
 [dependencies]
 kynveil-protocol = { path = "../crates/kynveil-protocol" }
-kynveil-sqlcipher-native = { path = "../crates/kynveil-sqlcipher-native" }
-openssl-sys = { version = "=0.9.117", features = ["vendored"] }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 sha2 = "=0.11.0"
 subtle = "=2.6.1"

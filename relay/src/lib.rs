@@ -9,8 +9,6 @@ use kynveil_protocol::{
     ErrorCode, ErrorMessage, MailboxId, ProvisionMailbox, Retrieve, RevokeDeposit, WireMessage,
     canonical_recipient_snapshot_digest, capability_verifier, encode,
 };
-use kynveil_sqlcipher_native as _;
-use openssl_sys as _;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
