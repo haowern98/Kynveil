@@ -28,6 +28,22 @@ jobs:
           test "$(stat -c '%u:%g:%a' "$sandbox_path")" = "0:0:4755"
       - run: xvfb-run -a corepack pnpm verify
 
+  relay:
+    name: relay (standalone-sqlite)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: rustup toolchain install 1.97.0 --profile minimal
+      - name: Build and test relay without the SQLCipher wrapper
+        working-directory: relay
+        run: cargo test --locked
+      - name: Reject SQLCipher and OpenSSL relay dependencies
+        working-directory: relay
+        run: |
+          if cargo tree --locked --prefix none | grep -Eq '^(kynveil-sqlcipher-native|openssl-sys) v'; then
+            exit 1
+          fi
+
   storage:
     name: storage (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
