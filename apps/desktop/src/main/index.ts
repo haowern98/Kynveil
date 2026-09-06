@@ -25,7 +25,12 @@ async function createWindow(): Promise<void> {
     startupStep = 'sidecar binary lookup'
     throw new Error('sidecar unavailable')
   }
-  sidecar = createSidecarSupervisor(app.isPackaged, process.resourcesPath, applicationPath)
+  sidecar = createSidecarSupervisor(
+    app.isPackaged,
+    process.resourcesPath,
+    applicationPath,
+    app.getPath('userData')
+  )
   await sidecar.start()
   startupStep = 'window creation'
   const window = new BrowserWindow(
@@ -45,6 +50,29 @@ async function createWindow(): Promise<void> {
     }
     return sidecar.getStatus()
   })
+  for (const [channel, operation] of [
+    ['kynveil:get-profile-status', () => sidecar?.getProfileStatus()],
+    ['kynveil:lock-profile', () => sidecar?.lockProfile()],
+    ['kynveil:unlock-profile', () => sidecar?.unlockProfile()]
+  ] as const) {
+    ipcMain.handle(channel, async (event, ...arguments_: unknown[]) => {
+      if (
+        arguments_.length !== 0 ||
+        !isTrustedSender(event, window.webContents, rendererUrl) ||
+        sidecar?.state !== 'ready'
+      ) {
+        throw new Error('core unavailable')
+      }
+      const result = await operation()
+      if (result === undefined) throw new Error('core unavailable')
+      if (channel === 'kynveil:lock-profile' && result === 'locked') {
+        setTimeout(() => {
+          window.webContents.reload()
+        }, 0)
+      }
+      return result
+    })
+  }
 
   if (smokeTest) {
     const bridgeReady = (await window.webContents.executeJavaScript(
@@ -58,7 +86,7 @@ async function createWindow(): Promise<void> {
     const status = (await window.webContents.executeJavaScript(
       'window.kynveil.getStatus()'
     )) as unknown
-    if (status !== 'ready') throw new Error('invalid core status')
+    if (status !== 'ready' && status !== 'locked') throw new Error('invalid core status')
     startupStep = 'sidecar shutdown'
     await sidecar.shutdown()
     app.exit(0)
@@ -87,6 +115,9 @@ void app
 
 app.on('window-all-closed', () => {
   ipcMain.removeHandler('kynveil:get-status')
+  ipcMain.removeHandler('kynveil:get-profile-status')
+  ipcMain.removeHandler('kynveil:lock-profile')
+  ipcMain.removeHandler('kynveil:unlock-profile')
   const current = sidecar
   sidecar = undefined
   if (current?.state === 'ready') {
