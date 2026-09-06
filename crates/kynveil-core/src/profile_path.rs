@@ -96,6 +96,55 @@ impl ProfilePaths {
         }
         Ok(())
     }
+
+    pub(crate) fn protect_state_files(&self) -> Result<(), ProfilePathError> {
+        self.validate_existing_state_files()
+    }
+
+    /// Removes only the fixed Stage 3 profile artefacts after their connection is closed.
+    ///
+    /// Unknown content and media cause failure rather than widening deletion beyond the
+    /// storage layout that this version owns.
+    pub(crate) fn delete_profile_artifacts(&self) -> Result<(), ProfilePathError> {
+        self.validate_existing_state_files()?;
+        validate_profile_directory(&self.root)?;
+        validate_profile_directory(&self.media)?;
+        if fs::read_dir(&self.media)
+            .map_err(|_| ProfilePathError::Io)?
+            .next()
+            .is_some()
+        {
+            return Err(ProfilePathError::UnexpectedPathType);
+        }
+        for entry in fs::read_dir(&self.root).map_err(|_| ProfilePathError::Io)? {
+            let name = entry.map_err(|_| ProfilePathError::Io)?.file_name();
+            if ![
+                OsString::from(METADATA_FILE),
+                OsString::from(DATABASE_FILE),
+                OsString::from(format!("{DATABASE_FILE}-wal")),
+                OsString::from(format!("{DATABASE_FILE}-shm")),
+                OsString::from(MEDIA_DIRECTORY),
+            ]
+            .contains(&name)
+            {
+                return Err(ProfilePathError::UnexpectedPathType);
+            }
+        }
+        fs::remove_dir(&self.media).map_err(|_| ProfilePathError::Io)?;
+        for path in [
+            &self.metadata,
+            &self.database,
+            &self.database_wal,
+            &self.database_shm,
+        ] {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(ProfilePathError::Io),
+            }
+        }
+        fs::remove_dir(&self.root).map_err(|_| ProfilePathError::Io)
+    }
 }
 
 fn ensure_profile_directory(path: &Path) -> Result<(), ProfilePathError> {
