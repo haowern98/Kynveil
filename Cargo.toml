@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/kynveil-core", "crates/kynveil-sqlcipher-native", "relay"]
+members = ["crates/kynveil-core", "crates/kynveil-protocol", "crates/kynveil-sqlcipher-native", "relay"]
 resolver = "3"
 
 [workspace.package]
