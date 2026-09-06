@@ -1,6 +1,6 @@
 # Kynveil Protocol Specification
 
-**Status:** Approved V1.0 relay contract  
+**Status:** Approved V1.0 relay contract
 **Scope:** Stage 4 typed local protocol and blind-relay persistence. Transport is intentionally excluded until the Tor transport work in Stage 5.
 
 ## Encoding and Validation
@@ -123,4 +123,3 @@ Error = { 0: 1, 1: 0, 2: 8, 3: error_code: uint }
 | `QUOTA_EXCEEDED` | 7 |
 
 Errors have no free-form detail, path, identifier, or secret-derived field. The relay is SQLite-backed, in-process, and transport-neutral in Stage 4. It does not expose HTTP, TCP, WebSocket, LAN, or clearnet listeners. Stage 5 owns the Tor/WebSocket transport boundary.
-
