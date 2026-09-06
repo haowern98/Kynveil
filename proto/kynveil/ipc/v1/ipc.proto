@@ -16,6 +16,12 @@ message Envelope {
     ShutdownRequest shutdown_request = 14;
     ShutdownResponse shutdown_response = 15;
     ErrorResponse error_response = 16;
+    GetProfileStatusRequest get_profile_status_request = 17;
+    GetProfileStatusResponse get_profile_status_response = 18;
+    LockProfileRequest lock_profile_request = 19;
+    LockProfileResponse lock_profile_response = 20;
+    UnlockProfileRequest unlock_profile_request = 21;
+    UnlockProfileResponse unlock_profile_response = 22;
   }
 }
 
@@ -36,6 +42,23 @@ message GetStatusResponse {
 enum CoreState {
   CORE_STATE_UNSPECIFIED = 0;
   CORE_STATE_READY = 1;
+  CORE_STATE_LOCKED = 2;
+}
+
+message GetProfileStatusRequest {}
+message GetProfileStatusResponse { ProfileState state = 1; }
+message LockProfileRequest {}
+message LockProfileResponse { ProfileState state = 1; }
+message UnlockProfileRequest {}
+message UnlockProfileResponse { ProfileState state = 1; }
+
+enum ProfileState {
+  PROFILE_STATE_UNSPECIFIED = 0;
+  PROFILE_STATE_UNLOCKED = 1;
+  PROFILE_STATE_LOCKED = 2;
+  PROFILE_STATE_KEYSTORE_UNAVAILABLE = 3;
+  PROFILE_STATE_CORRUPT = 4;
+  PROFILE_STATE_ERROR = 5;
 }
 
 message ShutdownRequest {}
