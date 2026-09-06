@@ -738,8 +738,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "kynveil-protocol"
+version = "0.0.0"
+dependencies = [
+ "minicbor",
+ "sha2",
+]
+
+[[package]]
 name = "kynveil-relay"
 version = "0.0.0"
+dependencies = [
+ "kynveil-protocol",
+ "kynveil-sqlcipher-native",
+ "openssl-sys",
+ "rusqlite",
+ "sha2",
+ "subtle",
+]
 
 [[package]]
 name = "kynveil-sqlcipher-native"
@@ -761,6 +777,7 @@ version = "0.38.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
 dependencies = [
+ "cc",
  "pkg-config",
  "vcpkg",
 ]
