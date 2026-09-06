@@ -1,9 +1,21 @@
 [package]
 name = "kynveil-relay"
 version = "0.0.0"
-edition.workspace = true
-license.workspace = true
-rust-version.workspace = true
+edition = "2024"
+license = "AGPL-3.0-or-later"
+rust-version = "1.97"
 
 [lints]
-workspace = true
+rust.missing_docs = "deny"
+rust.unsafe_code = "deny"
+clippy.all = "deny"
+clippy.pedantic = "deny"
+
+[dependencies]
+kynveil-protocol = { path = "../crates/kynveil-protocol" }
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
+sha2 = "=0.11.0"
+subtle = "=2.6.1"
+
+[workspace]
+resolver = "3"

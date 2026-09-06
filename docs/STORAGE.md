@@ -383,7 +383,26 @@ Relay persistence survives process restart for:
 
 The relay need not persist presence, connections, or disposable rate counters. It must enforce storage and object limits before allocation and use crash-safe updates for deposit, retrieval cursor, ACK, expiry, and deletion eligibility.
 
-After every intended recipient has validly acknowledged an object, its relay ciphertext becomes eligible for deletion. Undelivered objects expire by TTL. Deletion is operational cleanup, not cryptographic erasure from recipients or storage media.
+After every intended recipient has validly acknowledged an object, the relay
+logically deletes its shared ciphertext. Undelivered objects logically expire
+by TTL. Logical deletion is operational cleanup, not cryptographic or forensic
+erasure from recipients, SQLite/WAL, journals, storage media, snapshots, or
+backups.
+
+Stage 4 stores exactly three capability verifier domains:
+`kynveil/v1/relay/retrieve-verifier`,
+`kynveil/v1/relay/management-verifier`, and
+`kynveil/v1/relay/deposit-verifier`. Each verifier is
+`SHA-256(ASCII_DOMAIN || 0x00 || capability)`. Raw capabilities are transient
+and never persisted. A mailbox has one retrieve verifier, one management
+verifier, and at most 256 independent deposit verifiers.
+
+To preserve no-op retry semantics after logical deletion, the relay retains a
+bounded non-content tombstone through the original expiry: object ID,
+ciphertext SHA-256, delivery class, TTL, canonical recipient-snapshot digest,
+and expiry. It retains no ciphertext, prevents an exact retry from recreating
+delivery state, and rejects altered semantics. Tombstones may be purged after
+expiry; permanent object-ID replay detection is intentionally unavailable.
 
 Relay host-volume encryption is recommended defense in depth but is not required for Kynveil's E2EE confidentiality claim because only ciphertext and opaque operational state may be stored.
 

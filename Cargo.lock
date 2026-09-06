@@ -738,8 +738,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "kynveil-relay"
+name = "kynveil-protocol"
 version = "0.0.0"
+dependencies = [
+ "minicbor",
+ "sha2",
+]
 
 [[package]]
 name = "kynveil-sqlcipher-native"
