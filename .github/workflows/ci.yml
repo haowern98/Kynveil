@@ -86,3 +86,37 @@ jobs:
           if printf '%s\n' "$dependencies" | grep -Eiq 'lib(crypto|ssl|sqlcipher|sqlite3)(\.so|\.dylib|\.dll)'; then
             exit 1
           fi
+      - name: Reject unexpected runtime crypto or SQLite libraries on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binaries = @(Get-ChildItem -LiteralPath target/debug/deps -Filter 'kynveil_core-*.exe' -File)
+          if ($binaries.Count -eq 0) {
+            throw 'No kynveil_core test executable was produced'
+          }
+
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) {
+            throw 'Visual Studio locator is unavailable'
+          }
+
+          $install = @(& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath) |
+            Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
+            Select-Object -First 1
+          if (-not $install) {
+            throw 'Visual C++ tools installation is unavailable'
+          }
+
+          $dumpbin = Get-ChildItem -LiteralPath $install -Filter dumpbin.exe -Recurse -File |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $dumpbin) {
+            throw 'dumpbin.exe is unavailable'
+          }
+
+          foreach ($binary in $binaries) {
+            $imports = & $dumpbin /DEPENDENTS $binary.FullName 2>&1
+            $imports | ForEach-Object { $_.ToString() }
+            if ($imports -match '(?im)^\s*(?:libcrypto|libssl|sqlcipher|sqlite3)(?:[-_.][^\r\n]*)?\.dll\s*$') {
+              throw "Forbidden dynamic crypto or SQLite DLL import detected in $($binary.Name)"
+            }
+          }

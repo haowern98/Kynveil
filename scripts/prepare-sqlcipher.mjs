@@ -118,7 +118,7 @@ export async function prepareSqlcipherBuildSource({ sourceDirectory, buildDirect
     throw new Error('SQLCipher build directory must be separate from the verified source')
   }
 
-  await rm(build, { recursive: true, force: true })
+  await rm(build, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   await mkdir(dirname(build), { recursive: true })
   await cp(source, build, { recursive: true, force: false, errorOnExist: true })
 }
