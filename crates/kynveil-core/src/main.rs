@@ -26,27 +26,16 @@ fn run() -> ExitCode {
     else {
         return ExitCode::FAILURE;
     };
-    let profile = match paths {
-        Some(paths) => {
-            let created_at =
-                match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-                    Ok(duration) => duration.as_secs(),
-                    Err(_) => return ExitCode::FAILURE,
-                };
-            match profile::ProfileLifecycle::open_or_create(
-                &paths,
-                &keyring::NativeProfileMasterSecretStore,
-                created_at,
-            ) {
-                Ok(profile) => Some(profile),
-                Err(_) => return ExitCode::FAILURE,
-            }
-        }
-        None => None,
+    let Some(paths) = paths else {
+        return ExitCode::FAILURE;
     };
-    let service = ipc::run_stdio();
-    let locked = profile.map_or(Ok(()), profile::ProfileLifecycle::lock);
-    if service.is_ok() && locked.is_ok() {
+    let created_at = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs(),
+        Err(_) => return ExitCode::FAILURE,
+    };
+    let profile =
+        profile::ProfileController::new(paths, keyring::NativeProfileMasterSecretStore, created_at);
+    if ipc::run_stdio(profile).is_ok() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

@@ -1,14 +1,18 @@
 import { create, fromBinary, toBinary } from '@bufbuild/protobuf'
 import { spawn } from 'node:child_process'
 import type { Readable, Writable } from 'node:stream'
-import { dirname, resolve } from 'node:path'
+import { dirname, isAbsolute, resolve } from 'node:path'
 
 import {
   CoreState,
   EnvelopeSchema,
+  GetProfileStatusRequestSchema,
   GetStatusRequestSchema,
   HelloRequestSchema,
+  LockProfileRequestSchema,
+  ProfileState,
   ShutdownRequestSchema,
+  UnlockProfileRequestSchema,
   type Envelope
 } from '../generated/kynveil/ipc/v1/ipc_pb.js'
 
@@ -20,6 +24,13 @@ const MAX_QUEUED_FRAMES = 256
 const MAX_QUEUED_BYTES = 16 * 1024 * 1024
 const MAX_BUFFERED_BYTES = MAX_QUEUED_BYTES + MAX_QUEUED_FRAMES * 4
 const MAX_DIAGNOSTIC_BYTES = 64 * 1024
+
+export type ProfileStatus =
+  | 'unlocked'
+  | 'locked'
+  | 'keystore-unavailable'
+  | 'corrupt'
+  | 'error'
 
 export interface ProcessHandle {
   readonly stdin: Writable
@@ -104,6 +115,12 @@ export function sanitizedEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessE
   return result
 }
 
+/** Builds the only bootstrap argument that selects the Electron-owned profile root. */
+export function userDataRootArgument(userDataRoot: string): string {
+  if (!isAbsolute(userDataRoot)) throw new Error('user data root must be absolute')
+  return `--user-data-root=${userDataRoot}`
+}
+
 /** Owns one Rust sidecar session and locks on any post-handshake ambiguity. */
 export class SidecarSupervisor {
   #child: ProcessHandle | undefined
@@ -145,7 +162,7 @@ export class SidecarSupervisor {
     }
   }
 
-  async getStatus(): Promise<'ready'> {
+  async getStatus(): Promise<'ready' | 'locked'> {
     this.#requireReady()
     const response = await this.#request(
       { case: 'getStatusRequest', value: create(GetStatusRequestSchema) },
@@ -153,11 +170,45 @@ export class SidecarSupervisor {
       this.#deadlines.requestMs,
       'request timed out'
     )
-    if (response.body.case !== 'getStatusResponse' || response.body.value.state !== CoreState.READY) {
+    if (response.body.case !== 'getStatusResponse') {
       this.#lock('invalid status response')
       throw new Error('invalid status response')
     }
-    return 'ready'
+    if (response.body.value.state === CoreState.READY) return 'ready'
+    if (response.body.value.state === CoreState.LOCKED) return 'locked'
+    this.#lock('invalid status response')
+    throw new Error('invalid status response')
+  }
+
+  async getProfileStatus(): Promise<ProfileStatus> {
+    return this.#profileRequest(
+      { case: 'getProfileStatusRequest', value: create(GetProfileStatusRequestSchema) },
+      'getProfileStatusResponse'
+    )
+  }
+
+  async lockProfile(): Promise<ProfileStatus> {
+    return this.#profileRequest(
+      { case: 'lockProfileRequest', value: create(LockProfileRequestSchema) },
+      'lockProfileResponse'
+    )
+  }
+
+  async unlockProfile(): Promise<ProfileStatus> {
+    return this.#profileRequest(
+      { case: 'unlockProfileRequest', value: create(UnlockProfileRequestSchema) },
+      'unlockProfileResponse'
+    )
+  }
+
+  async #profileRequest(
+    body: Envelope['body'],
+    expectedCase: 'getProfileStatusResponse' | 'lockProfileResponse' | 'unlockProfileResponse'
+  ): Promise<ProfileStatus> {
+    this.#requireReady()
+    const response = await this.#request(body, expectedCase, this.#deadlines.requestMs, 'request timed out')
+    if (response.body.case !== expectedCase) throw new Error('invalid profile response')
+    return profileStatus(response.body.value.state)
   }
 
   async shutdown(): Promise<void> {
@@ -365,15 +416,32 @@ export class SidecarSupervisor {
   }
 }
 
+function profileStatus(state: ProfileState): ProfileStatus {
+  switch (state) {
+    case ProfileState.UNLOCKED:
+      return 'unlocked'
+    case ProfileState.LOCKED:
+      return 'locked'
+    case ProfileState.KEYSTORE_UNAVAILABLE:
+      return 'keystore-unavailable'
+    case ProfileState.CORRUPT:
+      return 'corrupt'
+    default:
+      return 'error'
+  }
+}
+
 /** Creates the production supervisor with a direct, fixed-path child launch. */
 export function createSidecarSupervisor(
   packaged: boolean,
   resourcesPath: string,
-  applicationPath: string
+  applicationPath: string,
+  userDataRoot: string
 ): SidecarSupervisor {
   const binary = resolveSidecarPath(packaged, resourcesPath, applicationPath)
+  const bootstrapArgument = userDataRootArgument(userDataRoot)
   return new SidecarSupervisor(() => {
-    const child = spawn(binary, [], {
+    const child = spawn(binary, [bootstrapArgument], {
       cwd: dirname(binary),
       env: sanitizedEnvironment(process.env),
       shell: false,
