@@ -2,12 +2,9 @@ import { create, fromBinary, toBinary } from '@bufbuild/protobuf'
 import { randomBytes } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 
-import {
-  EnvelopeSchema,
-  GetStatusRequestSchema
-} from '../generated/kynveil/ipc/v1/ipc_pb.js'
+import { EnvelopeSchema, GetStatusRequestSchema } from '../generated/kynveil/ipc/v1/ipc_pb.js'
 
-describe('Stage 2 IPC schema', () => {
+describe('Stage 3 IPC schema', () => {
   it('round-trips an allowlisted GetStatus request', () => {
     const envelope = create(EnvelopeSchema, {
       protocolMajor: 1,
@@ -33,7 +30,14 @@ describe('Stage 2 IPC schema', () => {
       .map((field) => field.localName)
       .filter((name) => name.endsWith('Request'))
 
-    expect(operationNames).toEqual(['helloRequest', 'getStatusRequest', 'shutdownRequest'])
+    expect(operationNames).toEqual([
+      'helloRequest',
+      'getStatusRequest',
+      'shutdownRequest',
+      'getProfileStatusRequest',
+      'lockProfileRequest',
+      'unlockProfileRequest'
+    ])
     expect(operationNames.join(' ')).not.toMatch(forbidden)
   })
 })

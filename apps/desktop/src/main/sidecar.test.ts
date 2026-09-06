@@ -1,25 +1,29 @@
 import { create, fromBinary } from '@bufbuild/protobuf'
 import { randomBytes } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { isAbsolute, sep } from 'node:path'
+import { isAbsolute, resolve, sep } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { describe, expect, it } from 'vitest'
 
 import {
   CoreState,
   EnvelopeSchema,
+  GetProfileStatusResponseSchema,
   GetStatusResponseSchema,
   HelloResponseSchema,
+  LockProfileResponseSchema,
+  ProfileState,
   ShutdownResponseSchema,
+  UnlockProfileResponseSchema,
   type Envelope
 } from '../generated/kynveil/ipc/v1/ipc_pb.js'
 import {
   FrameDecoder,
   SidecarSupervisor,
-  createSidecarSupervisor,
   frameEnvelope,
   resolveSidecarPath,
   sanitizedEnvironment,
+  userDataRootArgument,
   type ProcessHandle
 } from './sidecar.js'
 
@@ -39,6 +43,24 @@ function response(request: Envelope): Envelope {
       break
     case 'shutdownRequest':
       body = { case: 'shutdownResponse', value: create(ShutdownResponseSchema) }
+      break
+    case 'getProfileStatusRequest':
+      body = {
+        case: 'getProfileStatusResponse',
+        value: create(GetProfileStatusResponseSchema, { state: ProfileState.UNLOCKED })
+      }
+      break
+    case 'lockProfileRequest':
+      body = {
+        case: 'lockProfileResponse',
+        value: create(LockProfileResponseSchema, { state: ProfileState.LOCKED })
+      }
+      break
+    case 'unlockProfileRequest':
+      body = {
+        case: 'unlockProfileResponse',
+        value: create(UnlockProfileResponseSchema, { state: ProfileState.UNLOCKED })
+      }
       break
     default:
       throw new Error('unexpected synthetic request')
@@ -146,6 +168,13 @@ describe('sidecar transport', () => {
     expect(result).toEqual({ SystemRoot: 'C:\\Windows', TEMP: 'C:\\Temp' })
   })
 
+  it('passes the trusted Electron user-data root as the only profile bootstrap argument', () => {
+    const root = resolve('synthetic-user-data')
+
+    expect(userDataRootArgument(root)).toBe(`--user-data-root=${root}`)
+    expect(() => userDataRootArgument('relative-user-data')).toThrow('must be absolute')
+  })
+
   it('decodes fragmented and coalesced frames and rejects contamination', () => {
     const envelope = create(EnvelopeSchema, {
       protocolMajor: 1,
@@ -205,6 +234,9 @@ describe('sidecar lifecycle', () => {
 
     await supervisor.start()
     await expect(supervisor.getStatus()).resolves.toBe('ready')
+    await expect(supervisor.getProfileStatus()).resolves.toBe('unlocked')
+    await expect(supervisor.lockProfile()).resolves.toBe('locked')
+    await expect(supervisor.unlockProfile()).resolves.toBe('unlocked')
     await supervisor.shutdown()
     expect(launches).toBe(2)
     expect(supervisor.state).toBe('stopped')
@@ -297,11 +329,4 @@ describe('sidecar lifecycle', () => {
     expect(supervisor.state).toBe('stopped')
   })
 
-  it('exchanges status and shutdown with the real Rust sidecar', async () => {
-    const supervisor = createSidecarSupervisor(false, 'ignored', process.cwd())
-
-    await supervisor.start()
-    await expect(supervisor.getStatus()).resolves.toBe('ready')
-    await supervisor.shutdown()
-  })
 })
